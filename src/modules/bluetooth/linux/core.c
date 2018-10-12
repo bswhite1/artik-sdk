@@ -193,7 +193,8 @@ static void _device_properties_changed(const gchar *path, GVariant *properties)
 
 		} else if (g_strcmp0(key, "Paired") == 0) {
 
-			if (hci.state == BT_DEVICE_STATE_IDLE)
+			if (hci.state == BT_DEVICE_STATE_IDLE
+				    || hci.state == BT_DEVICE_STATE_PAIRING)
 				_process_connection_cb(path, BT_EVENT_BOND);
 
 		} else if (g_strcmp0(key, "ServicesResolved") == 0) {
