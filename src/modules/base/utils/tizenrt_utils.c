@@ -112,23 +112,15 @@ artik_error os_get_uri_info(artik_uri_info *uri_info, const char *uri)
 			break;
 
 		case URI_PATH:
-			/* If we find query params, just ignore them */
-			if (c == '?') {
-				path.end = uri + i;
-				goto uri_end;
-			}
-
 			if (!isalnum(c) && c != '-' && c != '.' && c != '_' && c != '~'
 				&& c != '!' && c != '$' && c != '&' && c != '/' && c != '('
 				&& c != ')' && c != '*' && c != '+' && c != ',' && c != ';'
-				&& c != '=' && c != ':' && c != '@') {
+				&& c != '=' && c != ':' && c != '@' && c != '?' ) {
 				return E_BAD_ARGS;
 			}
 			break;
 		}
 	}
-
-uri_end:
 
 	if (state == URI_SCHEME_START || state == URI_SCHEME_LOOP)
 		return E_BAD_ARGS;
