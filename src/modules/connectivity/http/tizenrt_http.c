@@ -44,6 +44,9 @@
 
 #define _HTTP_API_TIMEOUT	10
 
+#define PEM_BEGIN_CRT		"-----BEGIN CERTIFICATE-----\n"
+#define PEM_END_CRT		"-----END CERTIFICATE-----\n"
+
 struct _http_param {
 	char *url;
 	char *body;
@@ -61,15 +64,26 @@ static int see_generate_random_client(void *ctx, unsigned char *data, size_t len
 {
 	artik_security_module *security = NULL;
 	artik_security_handle handle;
+	unsigned char *rand = NULL;
+	int ret = 0;
 
 	if (!data || !len)
 		return -1;
 
 	security = (artik_security_module *)artik_request_api_module("security");
 	security->request(&handle);
-	security->get_random_bytes(handle, data, len);
+
+	ret = security->get_random_bytes(handle, len, &rand);
+	if(ret == 0) {
+		memcpy(data, rand, len);
+		if(rand) {
+			free(rand);
+		}
+	}
+
 	security->release(handle);
 	artik_release_api_module(security);
+
 
 	return 0;
 }
@@ -159,7 +173,7 @@ static artik_error init_client_ssl_config(
 
 	mbedtls_ssl_config_init(http_ssl_config->ssl->tls_conf);
 	mbedtls_ssl_config_defaults(http_ssl_config->ssl->tls_conf, MBEDTLS_SSL_IS_CLIENT,
-				    MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+					MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
 	mbedtls_entropy_init(http_ssl_config->entropy);
 	mbedtls_ctr_drbg_init(http_ssl_config->ctr_drbg);
 
@@ -187,18 +201,9 @@ static artik_error init_client_ssl_config(
 //	mbedtls_debug_set_threshold(MBED_DEBUG_LEVEL);
 #endif
 
-	if (a_ssl_config->se_config.use_se) {
-		artik_security_handle handle;
-		artik_error err = S_OK;
-		char *se_cert = NULL;
-		char *se_root_ca = NULL;
-		artik_security_module *security = NULL;
-
-		security = (artik_security_module *)
-				artik_request_api_module("security");
-		if (!security) {
-			log_err("Security module is not available\n");
-			ret = E_NOT_SUPPORTED;
+	if (a_ssl_config->se_config) {
+		if (!a_ssl_config->client_cert.data || a_ssl_config->client_cert.len == 0) {
+			ret = E_BAD_ARGS;
 			goto exit;
 		}
 
@@ -214,34 +219,17 @@ static artik_error init_client_ssl_config(
 			goto exit;
 		}
 
-		err = security->request(&handle);
-		if (err != S_OK) {
-			log_err("Failed to request security instance (err=%d)\n", err);
-			ret = E_NOT_SUPPORTED;
-			goto exit;
-		}
-
-		err = security->get_certificate(handle, CERT_ID_ARTIK, &se_cert);
-		if (err != S_OK || !se_cert) {
-			log_err("Failed to get certificate (err=%d)\n", err);
-			ret = E_ACCESS_DENIED;
-			goto exit;
-		}
-
-		security->release(handle);
-		artik_release_api_module(security);
-
 		mbedtls_ssl_conf_rng(http_ssl_config->ssl->tls_conf, see_generate_random_client,
 				http_ssl_config->ctr_drbg);
 		mbedtls_x509_crt_init(http_ssl_config->cert);
 		mbedtls_pk_init(http_ssl_config->pkey);
 
-		ret = mbedtls_x509_crt_parse(http_ssl_config->cert, (const unsigned char *)se_cert,
-				strlen(se_cert) + 1);
+		/* Use the device cert */
+		ret = mbedtls_x509_crt_parse(
+			http_ssl_config->cert, (unsigned char*)a_ssl_config->client_cert.data,
+			a_ssl_config->client_cert.len);
 		if (ret) {
 			log_err("Failed to parse device certificate (err=%d)", ret);
-			free(se_cert);
-			free(se_root_ca);
 			ret = E_BAD_ARGS;
 			goto exit;
 		}
@@ -249,8 +237,6 @@ static artik_error init_client_ssl_config(
 		http_ssl_config->pk_info = mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY);
 		if (!http_ssl_config->pk_info) {
 			log_err("Failed to get private key info");
-			free(se_cert);
-			free(se_root_ca);
 			ret = E_BAD_ARGS;
 			goto exit;
 		}
@@ -258,8 +244,6 @@ static artik_error init_client_ssl_config(
 		ret = mbedtls_pk_setup(http_ssl_config->pkey, http_ssl_config->pk_info);
 		if (ret) {
 			log_err("Failed to setup private key info");
-			free(se_cert);
-			free(se_root_ca);
 			ret = E_BAD_ARGS;
 			goto exit;
 		}
@@ -273,15 +257,9 @@ static artik_error init_client_ssl_config(
 			http_ssl_config->ssl->tls_conf, http_ssl_config->cert, http_ssl_config->pkey);
 		if (ret) {
 			log_err("Failed to configure device cert/key (err=%d)", ret);
-			free(se_cert);
-			free(se_root_ca);
 			ret = E_BAD_ARGS;
 			goto exit;
 		}
-
-		free(se_cert);
-		free(se_root_ca);
-
 	} else {
 		/* If not using SE, using optional client cert/key
 		 * passed as parameters

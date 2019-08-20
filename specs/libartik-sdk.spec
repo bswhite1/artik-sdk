@@ -1,7 +1,7 @@
 Summary:            A SDK library for easing up development on Samsung's ARTIK IoT platform
 Name:               libartik-sdk
-Version:            1.8
-Release:            3%{?dist}
+Version:            1.9
+Release:            1%{?dist}
 Source:             %{name}-%{version}.tar.gz
 License:            Proprietary
 Group:              Development/Libraries
@@ -19,6 +19,7 @@ Requires: %{name}-wifi = %{version}-%{release}
 Requires: %{name}-zigbee = %{version}-%{release}
 Requires: %{name}-lwm2m = %{version}-%{release}
 Requires: %{name}-mqtt = %{version}-%{release}
+Requires: %{name}-coap = %{version}-%{release}
 
 %description
 This library contains a SDK for addressing common features and quickly building
@@ -35,6 +36,7 @@ Requires: %{name}-wifi-devel = %{version}-%{release}
 Requires: %{name}-zigbee-devel = %{version}-%{release}
 Requires: %{name}-lwm2m-devel = %{version}-%{release}
 Requires: %{name}-mqtt-devel = %{version}-%{release}
+Requires: %{name}-coap-devel = %{version}-%{release}
 Summary: Files needed for building applications against the ARTIK SDK libraries
 
 %description devel
@@ -43,7 +45,6 @@ This package contains development files for building programs against the ATIK S
 %package base
 Group: Development/Libraries
 Requires: glib2
-Requires: artiksee = 0.7
 Provides: %{name}-base.so.%{version}
 Provides: %{name}-base.so.1
 Summary: Base package needed by all the other packages of the SDK
@@ -171,7 +172,7 @@ This package contains development files for building programs against the ARTIK 
 %package zigbee
 Group: Development/Libraries
 Requires: %{name}-base = %{version}-%{release}
-Requires: libzigbee >= 0.7
+Requires: libzigbee >= 0.8
 Provides: %{name}-zigbee.so.%{version}
 Provides: %{name}-zigbee.so.1
 Summary: Package containing APIs for communicating with other devices over Zigbee
@@ -189,7 +190,7 @@ This package contains development files for building programs against the ARTIK 
 %package lwm2m
 Group: Development/Libraries
 Requires: %{name}-base = %{version}-%{release}
-Requires: wakaama-client = 1.5
+Requires: wakaama-client = 1.6
 Provides: %{name}-lwm2m.so.%{version}
 Provides: %{name}-lwm2m.so.1
 Summary: Package containing APIs for communicating with other devices over LWM2M
@@ -222,6 +223,24 @@ Summary: Files needed for building applications against the ARTIK SDK MQTT libra
 %description mqtt-devel
 This package contains development files for building programs against the ARTIK SDK MQTT library
 
+%package coap
+Group: Development/Libraries
+Requires: %{name}-base = %{version}-%{release}
+Requires: libcoap = 4.2.0
+Provides: %{name}-coap.so.%{version}
+Provides: %{name}-coap.so.1
+Summary: Package containing APIs for communicating with other devices over CoAP
+
+%description coap
+Package containing APIs for communicating with other devices over CoAP
+
+%package coap-devel
+Requires: %{name}-coap = %{version}-%{release}
+Summary: Files needed for building applications against the ARTIK SDK CoAP library
+
+%description coap-devel
+This package contains development files for building programs against the ARTIK SDK CoAP library
+
 %package tests
 Group: Development/Libraries
 Requires: %{name}-base = %{version}-%{release}
@@ -234,11 +253,29 @@ Requires: %{name}-wifi = %{version}-%{release}
 Requires: %{name}-zigbee = %{version}-%{release}
 Requires: %{name}-lwm2m = %{version}-%{release}
 Requires: %{name}-mqtt = %{version}-%{release}
+Requires: %{name}-coap = %{version}-%{release}
 Requires: CUnit
 Summary: Test programs to validate the ARTIK SDK.
 
 %description tests
 This package contains unit tests for the functions exposed by the ARTIK SDK.
+
+%package examples
+Group: Development/Libraries
+Requires: %{name}-base = %{version}-%{release}
+Requires: %{name}-systemio = %{version}-%{release}
+Requires: %{name}-connectivity = %{version}-%{release}
+Requires: %{name}-media = %{version}-%{release}
+Requires: %{name}-bluetooth = %{version}-%{release}
+Requires: %{name}-sensor = %{version}-%{release}
+Requires: %{name}-wifi = %{version}-%{release}
+Requires: %{name}-zigbee = %{version}-%{release}
+Requires: %{name}-lwm2m = %{version}-%{release}
+Requires: %{name}-mqtt = %{version}-%{release}
+Summary: Example program of the ARTIK SDK
+
+%description examples
+This package contains example program of the ARTIK SDK.
 
 %prep
 %setup -q
@@ -248,12 +285,14 @@ echo %{_host_cpu}
 %if %(echo %arm | egrep -c %{_host_cpu})
 cmake . -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_BUILD_TEST=1 \
+	-DCMAKE_BUILD_EXAMPLES=1 \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
 %else
 cmake . -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_TOOLCHAIN_FILE=target/toolchain-cross-arm.cmake \
         -DCMAKE_SYSROOT=%{_sysrootdir} \
         -DCMAKE_BUILD_TEST=1 \
+	-DCMAKE_BUILD_EXAMPLES=1 \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
 %define __strip "arm-linux-gnueabihf-strip"
 %endif
@@ -374,9 +413,23 @@ make install DESTDIR=%{buildroot}
 %{_includedir}/artik/mqtt/*
 %{_libdir}/pkgconfig/%{name}-mqtt.pc
 
+%files coap
+%defattr(-,root,root)
+%{_libdir}/%{name}-coap.so.*
+
+%files coap-devel
+%defattr(-,root,root)
+%{_libdir}/%{name}-coap.so
+%{_includedir}/artik/coap/*
+%{_libdir}/pkgconfig/%{name}-coap.pc
+
 %files tests
 %defattr(-,root,root)
 %{_libdir}/artik-sdk/tests/*
+
+%files examples
+%defattr(-, root,root)
+%{_libdir}/artik-sdk/examples/*
 
 %debug_package
 

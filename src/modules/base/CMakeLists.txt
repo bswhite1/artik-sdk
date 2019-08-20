@@ -2,6 +2,7 @@ CMAKE_MINIMUM_REQUIRED	( VERSION 2.8 )
 PROJECT			( artik-sdk-base C CXX )
 
 PKG_CHECK_MODULES ( GLIB REQUIRED glib-2.0 )
+PKG_CHECK_MODULES ( GIO REQUIRED gio-2.0 )
 FIND_PACKAGE ( Dl )
 FIND_PACKAGE ( OpenSSL )
 
@@ -20,6 +21,8 @@ SET ( SRC_BASE
 					time/artik_time.c
 					security/linux_security.c
 					security/artik_security.c
+					utils/artik_utils.c
+					utils/linux_utils.c
 )
 
 SET ( SRC_BASE_CPP
@@ -27,6 +30,7 @@ SET ( SRC_BASE_CPP
 					loop/cpp/artik_loop.cpp
 					security/cpp/artik_security.cpp
 					module/cpp/artik_module.cpp
+					utils/cpp/artik_uri.cpp
 )
 
 ADD_LIBRARY ( ${LIB_BASE}_c OBJECT ${SRC_BASE} )
@@ -51,6 +55,7 @@ TARGET_LINK_LIBRARIES ( ${LIB_BASE}
 						${GLIB_LIBRARIES}
 						${DL_LIBRARIES}
 						${OPENSSL_LIBRARIES}
+						${GIO_LIBRARIES}
 )
 
 MESSAGE("LINK ${OPENSSL_LIBRARIES}")

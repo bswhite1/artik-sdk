@@ -26,6 +26,7 @@
 #include <artik_module.h>
 #include <artik_loop.h>
 #include <artik_cloud.h>
+#include <artik_security.h>
 
 #define TEST_TIMEOUT_MS	(10*1000)
 #define TEST_WRITE_LIMIT (5)
@@ -50,6 +51,13 @@ static void websocket_connection_callback(void *user_data, void *result)
 					artik_request_api_module("loop");
 		loop->quit();
 		artik_release_api_module(loop);
+	} else if (connected == ARTIK_WEBSOCKET_CONNECTION_ERROR) {
+		fprintf(stdout, "Websocket connection error\n");
+
+		artik_loop_module *loop = (artik_loop_module *)
+					artik_request_api_module("loop");
+		loop->quit();
+		artik_release_api_module(loop);
 	} else {
 		fprintf(stderr, "TEST failed, handshake error\n");
 
@@ -64,7 +72,7 @@ static void on_timeout_callback(void *user_data)
 {
 	artik_loop_module *loop = (artik_loop_module *) user_data;
 
-	fprintf(stdout, "TEST: %s stop scanning, exiting loop\n", __func__);
+	fprintf(stdout, "exiting loop\n");
 
 	loop->quit();
 }
@@ -98,7 +106,7 @@ static void websocket_receive_callback(void *user_data, void *result)
 		fprintf(stdout, "receive failed\n");
 		return;
 	}
-	printf("received: %s\n", buffer);
+	fprintf(stdout, "received: %s\n", buffer);
 	free(result);
 }
 
@@ -120,7 +128,7 @@ static artik_error test_websocket_read(int timeout_ms,
 	 * receive messages from cloud
 	 */
 	ret = cloud->websocket_open_stream(&handle, access_token, device_id,
-					&ssl_config);
+					    10000, 5000, &ssl_config);
 	if (ret != S_OK) {
 		fprintf(stderr, "TEST failed, could not open Websocket (%d)\n",
 			ret);
@@ -179,7 +187,7 @@ static artik_error test_websocket_write(int timeout_ms,
 	 * from cloud
 	 */
 	ret = cloud->websocket_open_stream(&handle, access_token, device_id,
-		&ssl_config);
+					    10000, 5000, &ssl_config);
 	if (ret != S_OK) {
 		fprintf(stderr, "TEST failed, could not open Websocket (%d)\n",
 			ret);
@@ -231,6 +239,64 @@ exit:
 	return ret;
 }
 
+static artik_error fill_ssl_config(artik_ssl_config *ssl, const char *cert_name)
+{
+	artik_secure_element_config *se_config = NULL;
+	artik_security_module *security = NULL;
+	artik_security_handle sec_handle = NULL;
+
+	se_config = malloc(sizeof(artik_secure_element_config));
+	if (!se_config) {
+		fprintf(stderr, "Failed to allocate memory\n");
+		return E_SECURITY_ERROR;
+	}
+
+	se_config->key_id = cert_name;
+	se_config->key_algo = ECC_SEC_P256R1;
+	ssl->se_config = se_config;
+
+	security = (artik_security_module *)artik_request_api_module("security");
+	if (security->request(&sec_handle) != S_OK) {
+		fprintf(stderr, "Failed to request security module");
+		free(se_config);
+		artik_release_api_module(security);
+		return E_SECURITY_ERROR;
+	}
+
+	if (security->get_certificate(sec_handle, cert_name,
+			ARTIK_SECURITY_CERT_TYPE_PEM,
+			(unsigned char **)&ssl->client_cert.data, &ssl->client_cert.len) != S_OK) {
+		fprintf(stderr, "Failed to get certificate from the"\
+		   " security module");
+		goto error;
+	}
+
+	if (security->get_publickey(sec_handle, ECC_SEC_P256R1, cert_name,
+			(unsigned char **)&ssl->client_key.data, &ssl->client_key.len) != S_OK) {
+		fprintf(stderr, "Failed to get private key form the"\
+		   " security module");
+		goto error;
+	}
+
+	security->release(&sec_handle);
+	artik_release_api_module(security);
+	return S_OK;
+
+error:
+	if (ssl->client_cert.data)
+		free(ssl->client_cert.data);
+
+	if (ssl->client_key.data)
+		free(ssl->client_key.data);
+
+	if (ssl->se_config)
+		free(ssl->se_config);
+
+	security->release(&sec_handle);
+	artik_release_api_module(security);
+	return E_SECURITY_ERROR;
+}
+
 int main(int argc, char *argv[])
 {
 	int opt;
@@ -238,12 +304,12 @@ int main(int argc, char *argv[])
 	artik_ssl_config ssl_config;
 	struct stat st;
 	FILE *f;
-	char *root_ca = NULL; // Root CA certificate
+	char *root_ca = NULL;
+	char *cert_name = NULL;
 
 	memset(&ssl_config, 0, sizeof(artik_ssl_config));
-	ssl_config.se_config.use_se = false;
 
-	while ((opt = getopt(argc, argv, "t:d:m:svr:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:d:m:s:vr:")) != -1) {
 		switch (opt) {
 		case 't':
 			strncpy(access_token, optarg, MAX_PARAM_LEN);
@@ -255,7 +321,7 @@ int main(int argc, char *argv[])
 			test_message = strndup(optarg, strlen(optarg));
 			break;
 		case 's':
-			ssl_config.se_config.use_se = true;
+			cert_name = optarg;
 			break;
 		case 'v':
 			ssl_config.verify_cert = ARTIK_SSL_VERIFY_REQUIRED;
@@ -263,11 +329,11 @@ int main(int argc, char *argv[])
 		case 'r':
 			f = fopen(optarg, "rb");
 			if (!f) {
-				printf("File not found for parameter -r\n");
+				fprintf(stderr, "File not found for parameter -r\n");
 				return -1;
 			}
 			if (fstat(fileno(f), &st) < 0) {
-				printf("Failed to get file size\n");
+				fprintf(stderr, "Failed to get file size\n");
 				fclose(f);
 				return -1;
 			}
@@ -277,13 +343,13 @@ int main(int argc, char *argv[])
 
 			root_ca = malloc(st.st_size + 1);
 			if (!root_ca) {
-				printf("Failed to allocate memory for the root CA\n");
+				fprintf(stderr, "Failed to allocate memory for the root CA\n");
 				fclose(f);
 				return -1;
 			}
 
 			if (!fread(root_ca, st.st_size, 1, f)) {
-				printf("Failed to read root CA file\n");
+				fprintf(stderr, "Failed to read root CA file\n");
 				free(root_ca);
 				fclose(f);
 				return -1;
@@ -292,14 +358,22 @@ int main(int argc, char *argv[])
 			fclose(f);
 			break;
 		default:
-			printf("Usage: websocket-cloud-test\n"
+			fprintf(stdout, "Usage: websocket-cloud-test\n"
 				"[-t <access token>] [-d <device id>]\n"
 				"[-m <JSON type test message>]\n"
-				"[-s for enabling SDR (Secure Device\n"
+				"[-s <certificate name> for enabling SDR (Secure Device\n"
 				"Registered) test] \r\n");
-			printf("\t[-v for verifying root certificate]\n"
+			fprintf(stdout, "\t[-v for verifying root certificate]\n"
 				"[-r <CA root file>]\r\n");
 			return 0;
+		}
+	}
+
+	if (cert_name) {
+		if (fill_ssl_config(&ssl_config, cert_name) != S_OK) {
+			if (test_message != NULL)
+				free(test_message);
+			return -1;
 		}
 	}
 
@@ -316,6 +390,8 @@ int main(int argc, char *argv[])
 	ret = test_websocket_read(TEST_TIMEOUT_MS, ssl_config);
 
 exit:
+	if (ssl_config.se_config)
+		free(ssl_config.se_config);
 	if (test_message != NULL)
 		free(test_message);
 	if (ssl_config.ca_cert.data != NULL)

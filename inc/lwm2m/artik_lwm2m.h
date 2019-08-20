@@ -112,6 +112,8 @@ typedef enum {
 	ARTIK_LWM2M_EVENT_ERROR = 0,
 	ARTIK_LWM2M_EVENT_RESOURCE_EXECUTE,
 	ARTIK_LWM2M_EVENT_RESOURCE_CHANGED,
+	ARTIK_LWM2M_EVENT_CONNECT,
+	ARTIK_LWM2M_EVENT_DISCONNECT,
 	ARTIK_LWM2M_EVENT_COUNT
 } artik_lwm2m_event_t;
 
@@ -190,7 +192,7 @@ typedef struct {
 	/*!
 	 * \brief Secret key for PSK based DTLS/TLS connection
 	 *
-	 * This parameter is needed in Certificate mode, beacause in TCP
+	 * This parameter is needed in Certificate mode, because in TCP
 	 * the PSK is passed in query parameters.
 	 */
 	char *tls_psk_key;

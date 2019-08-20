@@ -127,14 +127,18 @@ artik_error bt_gatt_char_read_value(const char *addr, const char *srv_uuid,
 			char_uuid);
 
 	_get_gatt_path(addr, DBUS_IF_GATTSERVICE1, srv_uuid, NULL, NULL, &srv_path);
-	if (srv_path == NULL)
+	if (srv_path == NULL) {
+        log_err("%s srv_path == NULL", __func__);
 		return E_BT_ERROR;
+    }
 
 	_get_gatt_path(addr, DBUS_IF_GATTCHARACTERISTIC1, char_uuid, "Service",
 			srv_path, &char_path);
 	g_free(srv_path);
-	if (char_path == NULL)
+	if (char_path == NULL) {
+        log_err("%s char_path == NULL", __func__);
 		return E_BT_ERROR;
+    }
 
 	err = _read_value(DBUS_IF_GATTCHARACTERISTIC1, char_path, byte, byte_len);
 

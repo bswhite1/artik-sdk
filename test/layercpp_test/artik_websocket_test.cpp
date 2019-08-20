@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
 
 #include <artik_module.h>
 #include <artik_loop.h>
@@ -27,37 +28,35 @@
 
 static const char *echo_websocket_root_ca =
   "-----BEGIN CERTIFICATE-----\n"
-  "MIIDxTCCAq2gAwIBAgIBADANBgkqhkiG9w0BAQsFADCBgzELMAkGA1UEBhMCVVMx\r\n"
-  "EDAOBgNVBAgTB0FyaXpvbmExEzARBgNVBAcTClNjb3R0c2RhbGUxGjAYBgNVBAoT\r\n"
-  "EUdvRGFkZHkuY29tLCBJbmMuMTEwLwYDVQQDEyhHbyBEYWRkeSBSb290IENlcnRp\r\n"
-  "ZmljYXRlIEF1dGhvcml0eSAtIEcyMB4XDTA5MDkwMTAwMDAwMFoXDTM3MTIzMTIz\r\n"
-  "NTk1OVowgYMxCzAJBgNVBAYTAlVTMRAwDgYDVQQIEwdBcml6b25hMRMwEQYDVQQH\r\n"
-  "EwpTY290dHNkYWxlMRowGAYDVQQKExFHb0RhZGR5LmNvbSwgSW5jLjExMC8GA1UE\r\n"
-  "AxMoR28gRGFkZHkgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgLSBHMjCCASIw\r\n"
-  "DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL9xYgjx+lk09xvJGKP3gElY6SKD\r\n"
-  "E6bFIEMBO4Tx5oVJnyfq9oQbTqC023CYxzIBsQU+B07u9PpPL1kwIuerGVZr4oAH\r\n"
-  "/PMWdYA5UXvl+TW2dE6pjYIT5LY/qQOD+qK+ihVqf94Lw7YZFAXK6sOoBJQ7Rnwy\r\n"
-  "DfMAZiLIjWltNowRGLfTshxgtDj6AozO091GB94KPutdfMh8+7ArU6SSYmlRJQVh\r\n"
-  "GkSBjCypQ5Yj36w6gZoOKcUcqeldHraenjAKOc7xiID7S13MMuyFYkMlNAJWJwGR\r\n"
-  "tDtwKj9useiciAF9n9T521NtYJ2/LOdYq7hfRvzOxBsDPAnrSTFcaUaz4EcCAwEA\r\n"
-  "AaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYE\r\n"
-  "FDqahQcQZyi27/a9BUFuIMGU2g/eMA0GCSqGSIb3DQEBCwUAA4IBAQCZ21151fmX\r\n"
-  "WWcDYfF+OwYxdS2hII5PZYe096acvNjpL9DbWu7PdIxztDhC2gV7+AJ1uP2lsdeu\r\n"
-  "9tfeE8tTEH6KRtGX+rcuKxGrkLAngPnon1rpN5+r5N9ss4UXnT3ZJE95kTXWXwTr\r\n"
-  "gIOrmgIttRD02JDHBHNA7XIloKmf7J6raBKZV8aPEjoJpL1E/QYVN8Gb5DKj7Tjo\r\n"
-  "2GTzLH4U/ALqn83/B2gX2yKQOC16jdFU8WnjXzPKej17CuPKf1855eJ1usV2GDPO\r\n"
-  "LPAvTK33sefOT6jEm0pUBsV/fdUID+Ic/n4XuKxe9tQWskMJDE32p2u0mYRlynqI\r\n"
-  "4uJEvlz36hz1\r\n"
+  "MIIDSjCCAjKgAwIBAgIQRK+wgNajJ7qJMDmGLvhAazANBgkqhkiG9w0BAQUFADA/\n"
+  "MSQwIgYDVQQKExtEaWdpdGFsIFNpZ25hdHVyZSBUcnVzdCBDby4xFzAVBgNVBAMT\n"
+  "DkRTVCBSb290IENBIFgzMB4XDTAwMDkzMDIxMTIxOVoXDTIxMDkzMDE0MDExNVow\n"
+  "PzEkMCIGA1UEChMbRGlnaXRhbCBTaWduYXR1cmUgVHJ1c3QgQ28uMRcwFQYDVQQD\n"
+  "Ew5EU1QgUm9vdCBDQSBYMzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\n"
+  "AN+v6ZdQCINXtMxiZfaQguzH0yxrMMpb7NnDfcdAwRgUi+DoM3ZJKuM/IUmTrE4O\n"
+  "rz5Iy2Xu/NMhD2XSKtkyj4zl93ewEnu1lcCJo6m67XMuegwGMoOifooUMM0RoOEq\n"
+  "OLl5CjH9UL2AZd+3UWODyOKIYepLYYHsUmu5ouJLGiifSKOeDNoJjj4XLh7dIN9b\n"
+  "xiqKqy69cK3FCxolkHRyxXtqqzTWMIn/5WgTe1QLyNau7Fqckh49ZLOMxt+/yUFw\n"
+  "7BZy1SbsOFU5Q9D8/RhcQPGX69Wam40dutolucbY38EVAjqr2m7xPi71XAicPNaD\n"
+  "aeQQmxkqtilX4+U9m5/wAl0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNV\n"
+  "HQ8BAf8EBAMCAQYwHQYDVR0OBBYEFMSnsaR7LHH62+FLkHX/xBVghYkQMA0GCSqG\n"
+  "SIb3DQEBBQUAA4IBAQCjGiybFwBcqR7uKGY3Or+Dxz9LwwmglSBd49lZRNI+DT69\n"
+  "ikugdB/OEIKcdBodfpga3csTS7MgROSR6cz8faXbauX+5v3gTt23ADq1cEmv8uXr\n"
+  "AvHRAosZy5Q6XkjEGB5YGV8eAlrwDPGxrancWYaLbumR9YbK+rlmM6pZW87ipxZz\n"
+  "R8srzJmwN0jP41ZL9c8PDHIyh8bwRLtTcm1D9SZImlJnt1ir/md2cXjbDaJWFBM5\n"
+  "JDGFoqgCWjBH4d1QB7wCCZAA62RjYJsWvIjJEubSfZGL+T0yjWW06XyxV3bqxbYo\n"
+  "Ob8VZRzI9neWagqNdwvYkQsEjgfbKbYK7p2CNTUQ\n"
   "-----END CERTIFICATE-----\n";
 
 static char *test_message = NULL;
 
-static void on_timeout_callback(void *user_data) {
+static int quit_loop(void *user_data) {
   artik_loop_module *loop = reinterpret_cast<artik_loop_module*>(user_data);
 
-  fprintf(stdout, "TEST: %s stop scanning, exiting loop\n", __func__);
-
   loop->quit();
+  fprintf(stdout, "Loop quit!\n");
+
+  return true;
 }
 
 void websocket_receive_callback(void *user_data, void *result) {
@@ -81,15 +80,22 @@ void websocket_connection_callback(void *user_data, void *result) {
   artik::Websocket* websocket = (artik::Websocket*)user_data;
   intptr_t ret = reinterpret_cast<intptr_t>(result);
 
-  if (ret == ARTIK_WEBSOCKET_CLOSED) {
-    fprintf(stdout, "connection close\n");
-    artik_release_api_module(websocket);
-    goto exit;
-  }
-
   if (ret == ARTIK_WEBSOCKET_CONNECTED) {
     fprintf(stdout, "Writing: %s\n", test_message);
     websocket->write_stream(test_message);
+  } else if (ret == ARTIK_WEBSOCKET_CLOSED) {
+    fprintf(stdout, "connection close\n");
+    artik_loop_module *loop = reinterpret_cast<artik_loop_module*>(
+        artik_request_api_module("loop"));
+    loop->quit();
+    artik_release_api_module(websocket);
+    goto exit;
+  } else if (ret == ARTIK_WEBSOCKET_CONNECTION_ERROR) {
+    fprintf(stderr, "connection error\n");
+    artik_loop_module *loop = reinterpret_cast<artik_loop_module*>(
+        artik_request_api_module("loop"));
+    loop->quit();
+    artik_release_api_module(loop);
   } else {
     fprintf(stderr, "TEST failed, handshake error\n");
     artik_loop_module *loop = reinterpret_cast<artik_loop_module*>(
@@ -106,11 +112,11 @@ int main(int argc, char *argv[]) {
   int opt;
   bool verify = false;
   artik_error ret = S_OK;
-  int timeout_ms = 10*1000;
-  int timeout_id = 0;
   artik_loop_module *loop = reinterpret_cast<artik_loop_module*>(
       artik_request_api_module("loop"));
   char uri[26] = "ws://echo.websocket.org/";
+  unsigned int ping_period = 10000;
+  unsigned int pong_timeout = 5000;
 
   while ((opt = getopt(argc, argv, "m:vt")) != -1) {
     switch (opt) {
@@ -147,7 +153,8 @@ int main(int argc, char *argv[]) {
 
   ssl_config.verify_cert = ARTIK_SSL_VERIFY_REQUIRED;
 
-  artik::Websocket* websocket = new artik::Websocket(uri, &ssl_config);
+  artik::Websocket* websocket = new artik::Websocket(uri, ping_period,
+    pong_timeout, &ssl_config);
 
   ret = websocket->request();
   if (ret != S_OK) {
@@ -174,14 +181,14 @@ int main(int argc, char *argv[]) {
     goto exit;
   }
 
-  ret = loop->add_timeout_callback(&timeout_id, timeout_ms, on_timeout_callback,
-      reinterpret_cast<void*>(loop));
-
+  loop->add_signal_watch(SIGINT, quit_loop, reinterpret_cast<void *>(loop),
+    NULL);
   loop->run();
 
 exit:
 
   websocket->close_stream();
+  websocket->release();
 
   printf("TEST FINISHED: WEBSOCKET_CPP_TEST\n");
 

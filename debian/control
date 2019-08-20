@@ -14,15 +14,13 @@ Build-Depends: debhelper (>=10.2.1),
 	wakaama-client-dev,
 	libssl-dev,
 	libcunit1-dev,
-	libzigbee-dev
 Standards-Version: 3.9.6
 Homepage: https://artik.io
 
 Package: libartik-sdk-base
 Architecture: any-arm arm64
 Depends: ${shlibs:Depends}, ${misc:Depends}
-	libglib2.0-0,
-	artiksee (>= 0.7), artiksee(<< 0.8)
+	libglib2.0-0
 Description: Base package needed by all the other packages of the SDK
 
 Package: libartik-sdk-base-dev
@@ -95,6 +93,19 @@ Depends: libartik-sdk-bluetooth,
 	libartik-sdk-base-dev
 Description: Files needed for building applications against the ARTIK SDK Bluetooth library
 
+#Package: libartik-sdk-coap
+#Architecture: any-arm arm64
+#Depends: ${shlibs:Depends}, ${misc:Depends},
+#	libartik-sdk-base,
+#	libcoap (= 4.2.0-0ubuntu1)
+#Description: Package containing APIs for communicating with other devices over CoAP
+
+#Package: libartik-sdk-coap-dev
+#Architecture: any
+#Depends: libartik-sdk-coap,
+#	libartik-sdk-base-dev
+#Description: Files needed for building applications against the ARTIK SDK CoAP library
+
 #Package: libartik-sdk-wifi
 #Architecture: any-arm arm64
 #Depends: ${shlibs:Depends}, ${misc:Depends},
@@ -124,7 +135,7 @@ Description: Files needed for building applications against the ARTIK SDK Blueto
 #Architecture: any-arm arm64
 #Depends: ${shlibs:Depends}, ${misc:Depends},
 #	libartik-sdk-base,
-#	wakaama-client (>= 1.5), wakaama-client (<< 1.6)
+#	wakaama-client (>= 1.6), wakaama-client (<< 1.7)
 #Description: Package containing APIs for communicating with other devices over LWM2M
 #
 #Package: libartik-sdk-lwm2m-dev
@@ -153,12 +164,28 @@ Description: Files needed for building applications against the ARTIK SDK Blueto
 #	libartik-sdk-connectivity,
 #	libartik-sdk-media,
 #	libartik-sdk-bluetooth,
+#	libartik-sdk-coap,
 #	libartik-sdk-sensor,
 #	libartik-sdk-wifi,
 #	libartik-sdk-zigbee,
 #	libartik-sdk-lwm2m,
 #	libartik-sdk-mqtt,
 #Description: Test programs to validate the ARTIK SDK.
+#
+#Package: libartik-sdk-examples
+#Architecture: any-arm arm64
+#Depends: ${shlibs:Depends}, ${misc:Depends},
+#	libartik-sdk-base,
+#	libartik-sdk-systemio,
+#	libartik-sdk-connectivity,
+#	libartik-sdk-media,
+#	libartik-sdk-bluetooth,
+#	libartik-sdk-sensor,
+#	libartik-sdk-wifi,
+#	libartik-sdk-zigbee,
+#	libartik-sdk-lwm2m,
+#	libartik-sdk-mqtt,
+#Description: Example programs of the ARTIK SDK.
 #
 #Package: libartik-sdk
 #Architecture: any-arm arm64
@@ -168,6 +195,7 @@ Description: Files needed for building applications against the ARTIK SDK Blueto
 #	libartik-sdk-connectivity,
 #	libartik-sdk-media,
 #	libartik-sdk-bluetooth,
+#	libartik-sdk-coap,
 #	libartik-sdk-sensor,
 #	libartik-sdk-wifi,
 #	libartik-sdk-zigbee,
@@ -183,6 +211,7 @@ Description: Files needed for building applications against the ARTIK SDK Blueto
 #	libartik-sdk-connectivity-dev,
 #	libartik-sdk-media-dev,
 #	libartik-sdk-bluetooth-dev,
+#	libartik-sdk-coap-dev,
 #	libartik-sdk-sensor-dev,
 #	libartik-sdk-wifi-dev,
 #	libartik-sdk-zigbee-dev,
@@ -199,6 +228,7 @@ Description: Files needed for building applications against the ARTIK SDK Blueto
 #	libartik-sdk-connectivity,
 #	libartik-sdk-media,
 #	libartik-sdk-bluetooth,
+#	libartik-sdk-coap,
 #	libartik-sdk-sensor,
 #	libartik-sdk-wifi,
 #	libartik-sdk-zigbee,

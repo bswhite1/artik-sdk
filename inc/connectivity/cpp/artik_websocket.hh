@@ -44,7 +44,8 @@ class Websocket {
   artik_websocket_handle m_handle;
 
  public:
-  Websocket(const char* uri, artik_ssl_config *ssl_config);
+  Websocket(const char* uri, unsigned int ping_period,
+    unsigned int pong_timeout, artik_ssl_config *ssl_config);
   ~Websocket();
 
   artik_error request();
@@ -55,6 +56,7 @@ class Websocket {
   artik_error set_receive_callback(artik_websocket_callback callback,
       void *user_data);
   artik_error close_stream();
+  artik_error release();
 
  private:
   // Disable copy constructor and assignement operator

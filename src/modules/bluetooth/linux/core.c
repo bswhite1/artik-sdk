@@ -96,7 +96,7 @@ static void _hrp_callback(GVariant *v)
 	_user_callback(BT_EVENT_PF_HEARTRATE, &data);
 }
 
-static void _on_gatt_data_received(GVariant *properties, gchar *srv_uuid, gchar *char_uuid)
+static void _on_gatt_data_received(GVariant *properties, gchar *srv_uuid, gchar *char_uuid, gchar *path)
 {
 	GVariant *prop = NULL, *v = NULL, *v1 = NULL;
 	gchar *key = NULL;
@@ -121,6 +121,7 @@ static void _on_gatt_data_received(GVariant *properties, gchar *srv_uuid, gchar 
 	data.char_uuid = char_uuid;
 	data.length = len;
 	data.bytes = (unsigned char *)malloc(sizeof(unsigned char) * len);
+	data.path = path;
 
 	for (i = 0; i < len; i++) {
 		v1 = g_variant_get_child_value(v, i);
@@ -351,11 +352,16 @@ void _get_device_properties(GVariant *prop_array, artik_bt_device *device)
 		} else if (g_strcmp0(key, "UUIDs") == 0) {
 			uuid_len = g_variant_n_children(v);
 			device->uuid_length = uuid_len;
+
+			log_dbg("%s uuid_length %d", __func__, device->uuid_length);
+
 			if (uuid_len > 0) {
 				device->uuid_list
 					= (artik_bt_uuid *)malloc(sizeof(artik_bt_uuid) * uuid_len);
 				for (i = 0; i < uuid_len; i++) {
 					uuid = g_variant_get_child_value(v, i);
+
+					print_variant(uuid);
 
 					g_variant_get(uuid, "s", &device->uuid_list[i].uuid);
 					device->uuid_list[i].uuid_name
@@ -556,16 +562,32 @@ void _get_gatt_path(const char *addr, const char *interface, const char *uuid,
 
 	*gatt_path = NULL;
 
-	_get_object_path(addr, &dev_path);
-	if (dev_path == NULL)
-		return;
+	// log_err("%s addr: %s interface: %s uuid: %s", __func__, addr, interface, uuid);
 
-	if (_get_managed_objects(&obj1) != S_OK)
+	_get_object_path(addr, &dev_path);
+	if (dev_path == NULL) {
+		log_err("%s dev_path == NULL", __func__);
 		return;
+	}
+
+	if (_get_managed_objects(&obj1) != S_OK) {
+		log_err("%s _get_managed_objects != S_OK", __func__);
+		return;
+	}
+
+	// print_variant(obj1);
 
 	g_variant_get(obj1, "(a{oa{sa{sv}}})", &iter1);
+
+	// print_variant(iter1);
+
 	while (g_variant_iter_loop(iter1, "{&o@a{sa{sv}}}", &path, &ar1)) {
+
+		// log_err("%s Printing ar1", __func__);
+		// print_variant(ar1);
+
 		if (*gatt_path != NULL) {
+			// log_err("%s *gatt_path != NULL", __func__);
 			g_variant_unref(ar1);
 			break;
 		}
@@ -574,15 +596,25 @@ void _get_gatt_path(const char *addr, const char *interface, const char *uuid,
 			continue;
 
 		g_variant_get(ar1, "a{sa{sv}}", &iter2);
+
+		// print_variant(iter2);
+
 		while (g_variant_iter_loop(iter2, "{&s@a{sv}}", &itf, &ar2)) {
+
+			// print_variant(ar2);
 
 			if (*gatt_path != NULL) {
 				g_variant_unref(ar2);
+				// log_err("%s *gatt_path != NULL", __func__);
 				break;
 			}
 
-			if (g_strcmp0(itf, interface) != 0)
+			// log_err("%s interface: %s", __func__, itf);
+
+			if (g_strcmp0(itf, interface) != 0) {
+				// log_err("%s (itf, interface) != 0", __func__);
 				continue;
+			}
 
 			bool is_good_uuid = false;
 			bool is_good_property = false;
@@ -591,13 +623,22 @@ void _get_gatt_path(const char *addr, const char *interface, const char *uuid,
 				is_good_property = true;
 
 			g_variant_get(ar2, "a{sv}", &iter3);
+
+			// print_variant(iter3);
+
 			while (g_variant_iter_loop(iter3, "{&sv}", &key, &val)) {
+
+				// print_variant(val);
+
 				if (!g_strcmp0(key, "UUID")) {
 					const gchar *id = g_variant_get_string(val, NULL);
+
+					// log_err("%s id: %s", __func__, id);
 
 					if (!g_strcmp0(uuid, id))
 						is_good_uuid = true;
 				}
+
 
 				if (!g_strcmp0(key, property)) {
 					const gchar *str_val = g_variant_get_string(val, NULL);
@@ -607,6 +648,7 @@ void _get_gatt_path(const char *addr, const char *interface, const char *uuid,
 				}
 
 				if (is_good_property && is_good_uuid) {
+					// log_err("%s good property and uuid", __func__);
 					*gatt_path = strdup(path);
 					g_variant_unref(val);
 					break;
@@ -793,7 +835,7 @@ static void _gatt_properties_changed(const gchar *object_path,
 			client =  g_slist_nth_data(hci.gatt_clients, i);
 			if (g_strcmp0(object_path, client->path) == 0) {
 				_on_gatt_data_received(properties, client->srv_uuid,
-						client->char_uuid);
+						client->char_uuid, client->path);
 				break;
 			}
 		}

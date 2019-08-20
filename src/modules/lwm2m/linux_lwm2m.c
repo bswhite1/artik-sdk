@@ -20,7 +20,10 @@
 #include <artik_platform.h>
 #include <artik_loop.h>
 #include <artik_log.h>
-#include <artik_security.h>
+#include <artik_utils.h>
+
+#include <openssl/ssl.h>
+#include <openssl/engine.h>
 
 #include <artik_lwm2m.h>
 #include <artik_list.h>
@@ -36,8 +39,7 @@ typedef struct {
 	void *callbacks_params[ARTIK_LWM2M_EVENT_COUNT];
 	int service_cbk_id;
 	artik_loop_module *loop_module;
-	artik_security_module *security_module;
-	artik_security_handle security_handle;
+	bool connected;
 } lwm2m_node;
 
 typedef struct {
@@ -53,20 +55,46 @@ static int on_lwm2m_service_callback(void *user_data)
 {
 	lwm2m_node *node = (lwm2m_node *)user_data;
 	int timeout;
+	artik_error err;
 
 	timeout = lwm2m_client_service(node->client, 1000);
 	if (timeout < LWM2M_CLIENT_OK) {
 		log_dbg("");
-		if (node->callbacks[ARTIK_LWM2M_EVENT_ERROR]) {
-			artik_error err = (timeout == LWM2M_CLIENT_QUIT) ?
-						E_INTERRUPTED : E_LWM2M_ERROR;
-			node->callbacks[ARTIK_LWM2M_EVENT_ERROR]((void *)(intptr_t)err,
-					node->callbacks_params[
-						ARTIK_LWM2M_EVENT_ERROR]);
+		switch (timeout) {
+		case LWM2M_CLIENT_QUIT:
+			if (node->callbacks[ARTIK_LWM2M_EVENT_ERROR]) {
+				err = E_INTERRUPTED;
+				node->callbacks[ARTIK_LWM2M_EVENT_ERROR]((void *)(intptr_t)err,
+				node->callbacks_params[ARTIK_LWM2M_EVENT_ERROR]);
+			}
 			return 0;
+		case LWM2M_CLIENT_ERROR:
+			if (node->callbacks[ARTIK_LWM2M_EVENT_ERROR]) {
+				err = E_LWM2M_ERROR;
+				node->callbacks[ARTIK_LWM2M_EVENT_ERROR]((void *)(intptr_t)err,
+				node->callbacks_params[ARTIK_LWM2M_EVENT_ERROR]);
+			}
+			return 0;
+		case LWM2M_CLIENT_DISCONNECTED:
+			if (node->callbacks[ARTIK_LWM2M_EVENT_DISCONNECT]) {
+				err = E_LWM2M_DISCONNECTION_ERROR;
+				node->callbacks[ARTIK_LWM2M_EVENT_DISCONNECT]((void *)(intptr_t)err,
+				node->callbacks_params[ARTIK_LWM2M_EVENT_DISCONNECT]);
+				node->connected = false;
+			}
+			return 1;
+		default:
+			break;
 		}
 	}
 
+	if (node->callbacks[ARTIK_LWM2M_EVENT_CONNECT] &&
+		(node->connected != true)) {
+		err = S_OK;
+		node->callbacks[ARTIK_LWM2M_EVENT_CONNECT]((void *)(intptr_t)err,
+		node->callbacks_params[ARTIK_LWM2M_EVENT_CONNECT]);
+		node->connected = true;
+	}
 	return 1;
 }
 
@@ -202,11 +230,170 @@ static void on_resource_changed(void *user_data, void *extra)
 	}
 }
 
+static bool check_lwm2m_uri(const char *uri)
+{
+	artik_utils_module *utils = (artik_utils_module *)
+		artik_request_api_module("utils");
+	artik_uri_info uri_info;
+	bool ret = true;
+
+	if (utils->get_uri_info(&uri_info, uri) != S_OK) {
+		artik_release_api_module("utils");
+		return false;
+	}
+
+	if (strcmp("coap", uri_info.scheme) != 0
+		&& strcmp("coaps", uri_info.scheme) != 0
+		&& strcmp("coap+tcp", uri_info.scheme) != 0
+		&& strcmp("coaps+tcp", uri_info.scheme) != 0) {
+		log_dbg("scheme is %s", uri_info.scheme);
+		ret = false;
+	}
+
+	utils->free_uri_info(&uri_info);
+	artik_release_api_module(utils);
+
+	return ret;
+}
+
+static char *create_key_uri(artik_secure_element_config *se_config)
+{
+	const char *prefix;
+	char *engine_key_uri;
+
+	switch (se_config->key_algo) {
+	case RSA_1024:
+		prefix = "rsa1024://";
+		break;
+	case RSA_2048:
+		prefix = "rsa2048://";
+		break;
+	case ECC_BRAINPOOL_P256R1:
+		prefix = "bp256://";
+		break;
+	case ECC_SEC_P256R1:
+		prefix = "ec256://";
+		break;
+	case ECC_SEC_P384R1:
+		prefix = "ec384://";
+		break;
+	case ECC_SEC_P521R1:
+		prefix = "ec521://";
+		break;
+	default:
+		log_dbg("algo %d not supported", se_config->key_algo);
+		return NULL;
+	}
+
+	engine_key_uri = malloc(strlen(prefix) + strlen(se_config->key_id) + 1);
+	if (!engine_key_uri)
+		return NULL;
+
+	strcpy(engine_key_uri, prefix);
+	strcat(engine_key_uri, se_config->key_id);
+
+	return engine_key_uri;
+}
+
+static bool ssl_context_callback(void *ssl_ctx, void *user_data)
+{
+	X509 *cert = NULL;
+	BIO *b64 = NULL;
+	EVP_PKEY *pkey = NULL;
+	artik_security_module *security = NULL;
+	artik_ssl_config *ssl = user_data;
+	SSL_CTX *ctx = (SSL_CTX *)ssl_ctx;
+	bool ret = false;
+	char *uri = NULL;
+
+	security = (artik_security_module *)
+		artik_request_api_module("security");
+	if (!security) {
+		log_dbg("Failed to request security module.");
+		goto exit;
+	}
+
+	if (security->load_openssl_engine() != S_OK) {
+		log_dbg("Failed to load openssl engine");
+		goto exit;
+	}
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+	ENGINE *engine = ENGINE_get_default_ECDSA();
+#else
+	ENGINE *engine = ENGINE_get_default_EC();
+#endif
+
+	if (!engine) {
+		log_dbg("Failed to get default engine");
+		goto exit;
+	}
+
+	uri = create_key_uri(ssl->se_config);
+	if (!uri) {
+		log_dbg("Failed to create key uri");
+		goto exit;
+	}
+
+	pkey = ENGINE_load_private_key(engine,
+								   uri, NULL, NULL);
+			free(uri);
+	if (!pkey) {
+		log_dbg("Failed to load private key from artiksee");
+		goto exit;
+	}
+
+	b64 = BIO_new(BIO_s_mem());
+	if (!b64) {
+		log_dbg("Failed to allocate memory");
+		goto exit;
+	}
+
+	BIO_write(b64, ssl->client_cert.data, ssl->client_cert.len);
+
+	cert = PEM_read_bio_X509(b64, NULL, NULL, NULL);
+	if (!cert) {
+		log_dbg("Failed to parse client certificate");
+		goto exit;
+
+	}
+
+	if (!SSL_CTX_use_certificate(ctx, cert)) {
+		log_dbg("Failed to set client certificate");
+		goto exit;
+	}
+
+	if (!SSL_CTX_use_PrivateKey(ctx, pkey)) {
+		log_dbg("Failed to set client private key");
+		goto exit;
+	}
+
+	if (!SSL_CTX_check_private_key(ctx)) {
+		log_dbg("Failed to check private key");
+		goto exit;
+	}
+
+	ret = true;
+
+exit:
+	if (security)
+		artik_release_api_module(security);
+
+	if (pkey)
+		EVP_PKEY_free(pkey);
+
+	if (!cert)
+		X509_free(cert);
+
+	if (b64)
+		BIO_free(b64);
+
+	return ret;
+}
+
 artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 				artik_lwm2m_config *config)
 {
-	artik_security_module *security = NULL;
-	artik_security_handle sec_handle = NULL;
 	lwm2m_node *node = NULL;
 	object_container_t *objects;
 	object_security_server_t *server;
@@ -219,6 +406,9 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 		return E_BAD_ARGS;
 
 	if (config->lifetime < 0 || config->server_id < 0)
+		return E_BAD_ARGS;
+
+	if (!check_lwm2m_uri(config->server_uri))
 		return E_BAD_ARGS;
 
 	if (!config->tls_psk_identity && !config->ssl_config)
@@ -255,6 +445,7 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 	strncpy(server->client_name, config->name, LWM2M_MAX_STR_LEN - 1);
 	server->securityMode = LWM2M_SEC_MODE_PSK;
 
+	log_dbg("config->ssl_config = %p", config->ssl_config);
 	if (config->ssl_config) {
 		if (!config->tls_psk_key) {
 			ret = E_BAD_ARGS;
@@ -262,50 +453,14 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 		}
 
 		server->verifyCert = config->ssl_config->verify_cert == ARTIK_SSL_VERIFY_REQUIRED;
-
-		if (!config->ssl_config->se_config.use_se
-			&& config->ssl_config->client_cert.data && config->ssl_config->client_cert.len
+		log_dbg("Check cert mode");
+		if (config->ssl_config->client_cert.data && config->ssl_config->client_cert.len
 			&& config->ssl_config->client_key.data && config->ssl_config->client_key.len) {
 			server->clientCertificateOrPskId = strdup(config->ssl_config->client_cert.data);
 			server->privateKey = strdup(config->ssl_config->client_key.data);
 			server->securityMode = LWM2M_SEC_MODE_CERT;
-		} else if (config->ssl_config->se_config.use_se) {
-			security = (artik_security_module *)artik_request_api_module("security");
-			if (!security) {
-				log_dbg("Unable to request security module");
-				ret = E_SECURITY_ERROR;
-				goto exit;
-			}
-
-			ret = security->request(&sec_handle);
-			if (ret != S_OK) {
-				log_dbg("Unable to request security handle");
-				artik_release_api_module(security);
-				goto exit;
-			}
-
-			ret = security->get_certificate(sec_handle,
-						config->ssl_config->se_config.certificate_id,
-						&server->clientCertificateOrPskId);
-			if (ret != S_OK) {
-				security->release(sec_handle);
-				artik_release_api_module(security);
-				log_dbg("Unable to get certificate (err %d)", ret);
-				goto exit;
-			}
-
-			ret = security->get_key_from_cert(sec_handle, server->clientCertificateOrPskId,
-											&server->privateKey);
-			if (ret != S_OK) {
-				security->release(sec_handle);
-				log_dbg("Unable to get private key");
-				artik_release_api_module(security);
-				goto exit;
-			}
-
-			node->security_module = security;
-			node->security_handle = sec_handle;
-			server->securityMode = LWM2M_SEC_MODE_CERT;
+			log_dbg("Cert Mode");
+			log_dbg("server->clientCertif = %s", server->clientCertificateOrPskId);
 		} else if (!config->ssl_config->client_cert.data && !config->ssl_config->client_cert.len
 				   && !config->ssl_config->client_key.data && !config->ssl_config->client_key.len) {
 			if (!config->tls_psk_identity) {
@@ -333,7 +488,6 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 							config->tls_psk_key);
 	}
 
-	server->connect_timeout = config->connect_timeout;
 	server->lifetime = config->lifetime;
 	server->serverId = config->server_id;
 
@@ -381,11 +535,18 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 	node->container = objects;
 
 	/* Configure the client */
-	node->client = lwm2m_client_start(node->container, node->container->server->serverCertificate, false);
+	if (config->ssl_config && config->ssl_config->se_config)
+		node->client = lwm2m_client_start(node->container,
+				node->container->server->serverCertificate,
+				ssl_context_callback, config->ssl_config);
+	else
+		node->client = lwm2m_client_start(node->container,
+				node->container->server->serverCertificate, NULL, NULL);
 	if (!node->client) {
 		log_dbg("lwm2m_client error");
 		return E_BAD_ARGS;
 	}
+
 	*handle = (artik_lwm2m_handle)node;
 
 	return S_OK;
@@ -457,11 +618,6 @@ artik_error os_lwm2m_client_release(artik_lwm2m_handle handle)
 		free(node->container);
 	}
 
-	if (node->security_module) {
-		node->security_module->release(node->security_handle);
-		artik_release_api_module(node->security_module);
-	}
-
 	artik_release_api_module(node->loop_module);
 	artik_list_delete_node(&nodes, (artik_list *)node);
 	return S_OK;
@@ -476,6 +632,8 @@ artik_error os_lwm2m_client_connect(artik_lwm2m_handle handle)
 
 	if (!node)
 		return E_BAD_ARGS;
+
+	node->connected = false;
 
 	/* Start timeout callback to service the LWM2M library */
 	ret = node->loop_module->add_idle_callback(&node->service_cbk_id,
@@ -704,7 +862,8 @@ artik_lwm2m_object *os_lwm2m_create_device_object(const char *manufacturer,
 }
 
 artik_lwm2m_object *os_lwm2m_create_firmware_object(bool supported,
-					char *pkg_name, char *pkg_version) {
+		char *pkg_name, char *pkg_version)
+{
 	artik_lwm2m_object *obj = NULL;
 	object_firmware_t *content = NULL;
 

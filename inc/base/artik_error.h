@@ -92,6 +92,11 @@ typedef int artik_error;
 #define E_TIMEOUT			(-10)
 
 /*!
+ *  \brief An error occurred with the CoAP
+ */
+#define E_COAP_ERROR		(-15)
+
+/*!
  *  \brief An invalid value was returned
  */
 #define E_INVALID_VALUE		(-11)
@@ -157,12 +162,13 @@ typedef int artik_error;
 #define E_WIFI_ERROR_AUTHENTICATION	(-5001)
 #define E_WIFI_ERROR_ASSOCIATION	(-5002)
 #define E_WIFI_ERROR_BAD_PARAMS     (-5003)
+#define E_WIFI_ERROR_SCAN_BUSY     (-5004)
 
 /*!
  *  \brief An error occurred with the LWM2M service
  */
 #define E_LWM2M_ERROR		(-6000)
-
+#define E_LWM2M_DISCONNECTION_ERROR	(-6001)
 /*!
  *  \brief An error occurred with the MQTT
  */
@@ -216,6 +222,7 @@ static const artik_error_msg_string error_msg_strings[] = {
 	{E_WEBSOCKET_ERROR, "Websocket error"},
 	{E_BT_ERROR, "Bluetooth adapter error"},
 	{E_WIFI_ERROR, "Wi-Fi error"},
+	{E_COAP_ERROR, "CoAP error"},
 	{E_WIFI_ERROR_AUTHENTICATION, "Wi-Fi Authentication failed"},
 	{E_WIFI_ERROR_ASSOCIATION, "Wi-Fi Association failed"},
 	{E_WIFI_ERROR_BAD_PARAMS, "Wrong Wi-Fi parameters"},
@@ -229,6 +236,7 @@ static const artik_error_msg_string error_msg_strings[] = {
 	{E_ZIGBEE_NETWORK_EXIST, "Network has existed"},
 	{E_INVALID_VALUE, "Invalid value"},
 	{E_LWM2M_ERROR, "LWM2M error"},
+	{E_LWM2M_DISCONNECTION_ERROR, "LWM2M disconnection"},
 	{E_MQTT_ERROR, "MQTT error"},
 	{E_NETWORK_ERROR, "Network error"},
 	{E_SECURITY_ERROR, "Security error"},

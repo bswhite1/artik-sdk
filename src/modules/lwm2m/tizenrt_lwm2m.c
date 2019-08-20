@@ -29,11 +29,23 @@
 #include <pthread.h>
 #include <sched.h>
 
+#include <tls/asn1.h>
+#include <tls/see_api.h>
+#include <tls/ssl.h>
+#include <tls/x509_crt.h>
+
 enum lwm2m_connection_state {
 	LWM2M_INIT,
 	LWM2M_CONNECT,
 	LWM2M_EXIT,
 };
+
+#define PEM_BEGIN_CRT		"-----BEGIN CERTIFICATE-----\n"
+#define PEM_END_CRT		"-----END CERTIFICATE-----\n"
+#define PEM_BEGIN_PUBKEY	"-----BEGIN PUBLIC KEY-----"
+#define PEM_END_PUBKEY		"-----END PUBLIC KEY-----"
+#define PEM_BEGIN_EC_PRIV_KEY	"-----BEGIN EC PRIVATE KEY-----"
+#define PEM_END_EC_PRIV_KEY	"-----END EC PRIVATE KEY-----"
 
 typedef struct {
 	artik_list node;
@@ -47,6 +59,10 @@ typedef struct {
 	bool use_se;
 	pthread_t thread_id;
 	pthread_mutex_t mutex;
+	bool connected;
+
+	mbedtls_pk_context *device_pkey;
+	mbedtls_x509_crt *device_cert;
 } lwm2m_node;
 
 typedef struct {
@@ -61,24 +77,59 @@ static artik_list *nodes = NULL;
 static void *_lwm2m_service_thread(void *user_data)
 {
 	lwm2m_node *node = (lwm2m_node *)user_data;
-	int timeout;
+	int timeout = 0;
+	artik_error err = S_OK;
 
 	log_dbg("");
 	while (node->state == LWM2M_CONNECT) {
-		timeout = lwm2m_client_service(node->client, 100);
+		timeout = lwm2m_client_service(node->client, 1000);
 
-		if (timeout < LWM2M_CLIENT_OK) {
+		switch (timeout) {
+		case LWM2M_CLIENT_QUIT:
 			pthread_mutex_lock(&(node->mutex));
 			node->state = LWM2M_EXIT;
 			if (node->callbacks[ARTIK_LWM2M_EVENT_ERROR]) {
-				artik_error err = (timeout == LWM2M_CLIENT_QUIT)
-					? E_INTERRUPTED : E_LWM2M_ERROR;
+				err = E_INTERRUPTED;
 				node->callbacks[ARTIK_LWM2M_EVENT_ERROR](
 					(void *)err,
 					node->callbacks_params[
 						ARTIK_LWM2M_EVENT_ERROR]);
 			}
 			pthread_mutex_unlock(&(node->mutex));
+			break;
+		case LWM2M_CLIENT_ERROR:
+			pthread_mutex_lock(&(node->mutex));
+			node->state = LWM2M_EXIT;
+			if (node->callbacks[ARTIK_LWM2M_EVENT_ERROR]) {
+				err = E_LWM2M_ERROR;
+				node->callbacks[ARTIK_LWM2M_EVENT_ERROR](
+					(void *)err,
+					node->callbacks_params[
+						ARTIK_LWM2M_EVENT_ERROR]);
+			}
+			pthread_mutex_unlock(&(node->mutex));
+			break;
+		case LWM2M_CLIENT_DISCONNECTED:
+				pthread_mutex_lock(&(node->mutex));
+				node->state = LWM2M_EXIT;
+				if (node->callbacks[ARTIK_LWM2M_EVENT_DISCONNECT]) {
+					err = E_LWM2M_DISCONNECTION_ERROR;
+					node->callbacks[ARTIK_LWM2M_EVENT_DISCONNECT](
+						(void *)err,
+						node->callbacks_params[
+							ARTIK_LWM2M_EVENT_DISCONNECT]);
+					node->connected = false;
+				}
+				pthread_mutex_unlock(&(node->mutex));
+			break;
+		default:
+			if (node->callbacks[ARTIK_LWM2M_EVENT_CONNECT] && (!node->connected)) {
+				err = S_OK;
+				node->callbacks[ARTIK_LWM2M_EVENT_CONNECT]((void *)(intptr_t)err,
+				node->callbacks_params[ARTIK_LWM2M_EVENT_CONNECT]);
+				node->connected = true;
+			}
+			break;
 		}
 	}
 
@@ -187,6 +238,22 @@ static void on_resource_changed(void *user_data, void *extra)
 	}
 }
 
+
+static bool mbedtls_callback(void *ssl_ctx, void *user_data)
+{
+	mbedtls_ssl_config *config = ssl_ctx;
+	lwm2m_node *node = user_data;
+
+	if (mbedtls_ssl_conf_own_cert(config, node->device_cert, node->device_pkey) != 0) {
+#ifdef WITH_LOGS
+		fprintf(stderr, "Failed to configure device cert/key.\r\n");
+#endif
+		return false;
+	}
+
+	return true;
+}
+
 artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 				artik_lwm2m_config *config)
 {
@@ -196,6 +263,9 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 	artik_error ret = S_OK;
 	int i;
 	bool use_se = false;
+	artik_security_module *security = NULL;
+	artik_security_handle sec_handle = NULL;
+	pthread_mutexattr_t mutexattr;
 
 	log_dbg("");
 
@@ -216,6 +286,7 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 	memset(objects, 0, sizeof(object_container_t));
 	memset(server, 0, sizeof(object_security_server_t));
 	node->state = LWM2M_INIT;
+	node->connected = false;
 
 	/* Fill up server object based on passed config */
 	strncpy(server->serverUri, config->server_uri, LWM2M_MAX_STR_LEN);
@@ -229,52 +300,69 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 		}
 
 		server->verifyCert = config->ssl_config->verify_cert == ARTIK_SSL_VERIFY_REQUIRED;
-		node->use_se = config->ssl_config->se_config.use_se;
+		node->use_se = config->ssl_config->se_config != NULL;
 
-		if (!config->ssl_config->se_config.use_se
+		if (!config->ssl_config->se_config
 			&& config->ssl_config->client_cert.data && config->ssl_config->client_cert.len
 			&& config->ssl_config->client_key.data && config->ssl_config->client_key.len) {
 			server->clientCertificateOrPskId = strdup(config->ssl_config->client_cert.data);
 			server->privateKey = strdup(config->ssl_config->client_key.data);
 			server->securityMode = LWM2M_SEC_MODE_CERT;
-		} else if (config->ssl_config->se_config.use_se) {
-			artik_security_module *security =
-				(artik_security_module *)artik_request_api_module("security");
-			artik_security_handle sec_handle = NULL;
-			if (!security) {
-				log_dbg("Unable to request security module");
-				ret = E_SECURITY_ERROR;
+		} else if (config->ssl_config->se_config) {
+			if (!config->ssl_config->client_cert.data || config->ssl_config->client_cert.len == 0) {
+				ret = E_BAD_ARGS;
 				goto error;
 			}
 
-			ret = security->request(&sec_handle);
-			if (ret != S_OK) {
-				log_dbg("Unable to request security handle");
-				artik_release_api_module(security);
+			server->clientCertificateOrPskId = strdup(config->ssl_config->client_cert.data);
+			if (server->clientCertificateOrPskId == NULL) {
+				security->release(sec_handle);
+				ret = E_NO_MEM;
+				log_dbg("Failed to malloc (err=%d)\n", ret);
 				goto error;
 			}
 
-			ret = security->get_certificate(sec_handle, CERT_ID_ARTIK,
-					&server->clientCertificateOrPskId);
-			if (ret != S_OK) {
+			node->device_cert = malloc(sizeof(mbedtls_x509_crt));
+			if (!node->device_cert) {
+				security->release(sec_handle);
+				ret = E_NO_MEM;
+				log_dbg("Failed to malloc (err=%d)\n", ret);
+				goto error;
+			}
+
+			mbedtls_x509_crt_init(node->device_cert);
+			if (mbedtls_x509_crt_parse(
+					node->device_cert,
+					(unsigned char *)config->ssl_config->client_cert.data,
+					config->ssl_config->client_cert.len) != 0) {
+				security->release(sec_handle);
+				ret = E_BAD_ARGS;
+				log_dbg("Failed to parse device certificate (err=%d)\n", ret);
+				goto error;
+			}
+
+			node->device_pkey = malloc(sizeof(mbedtls_pk_context));
+			if (!node->device_pkey) {
 				security->release(sec_handle);
 				artik_release_api_module(security);
-				log_dbg("Unable to get certificate (err %d)", ret);
+				ret = E_NO_MEM;
+				log_dbg("Failed to malloc (err=%d)\n", ret);
 				goto error;
 			}
 
-			ret = security->get_key_from_cert(sec_handle, server->clientCertificateOrPskId, &server->privateKey);
-			if (ret != S_OK) {
-				security->release(sec_handle);
-				artik_release_api_module(security);
-				log_dbg("Unable to get certificate (err %d)", ret);
+			mbedtls_pk_init(node->device_pkey);
+			if (mbedtls_pk_setup(node->device_pkey, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) {
+				log_dbg("Failed to setup device private key");
 				goto error;
 			}
+
+			((mbedtls_ecdsa_context *)(node->device_pkey->pk_ctx))->grp.id =
+				MBEDTLS_ECP_DP_SECP256R1;
+			((mbedtls_ecdsa_context *)(node->device_pkey->pk_ctx))->key_index =
+				FACTORYKEY_ARTIK_DEVICE;
 
 			use_se = true;
 			server->securityMode = LWM2M_SEC_MODE_CERT;
-			security->release(sec_handle);
-			artik_release_api_module(security);
 		} else if (!config->ssl_config->client_cert.data && !config->ssl_config->client_cert.len
 				   && !config->ssl_config->client_key.data && !config->ssl_config->client_key.len) {
 			if (!config->tls_psk_identity) {
@@ -319,7 +407,8 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 				ret = E_NO_MEM;
 				goto error;
 			}
-			memcpy(objects->device, config->objects[i]->content, sizeof(object_device_t));
+			memcpy(objects->device, config->objects[i]->content,
+					sizeof(object_device_t));
 			break;
 		case ARTIK_LWM2M_OBJECT_CONNECTIVITY_MONITORING:
 			objects->monitoring = malloc(sizeof(object_conn_monitoring_t));
@@ -327,7 +416,8 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 				ret = E_NO_MEM;
 				goto error;
 			}
-			memcpy(objects->monitoring, config->objects[i]->content,sizeof(object_conn_monitoring_t));
+			memcpy(objects->monitoring, config->objects[i]->content,
+					sizeof(object_conn_monitoring_t));
 			break;
 		case ARTIK_LWM2M_OBJECT_FIRMWARE:
 			objects->firmware = malloc(sizeof(object_firmware_t));
@@ -335,7 +425,8 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 				ret = E_NO_MEM;
 				goto error;
 			}
-			memcpy(objects->firmware, config->objects[i]->content, sizeof(object_firmware_t));
+			memcpy(objects->firmware, config->objects[i]->content,
+					sizeof(object_firmware_t));
 			break;
 		default:
 			log_err("Unknown object");
@@ -343,14 +434,12 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 		}
 	}
 
-	pthread_mutexattr_t mutexattr;
 	if (pthread_mutexattr_init(&mutexattr) != 0) {
 		log_err("Failed to initialize lwm2m mutex attribute");
 		ret = E_LWM2M_ERROR;
 		goto error;
 	}
-	if (pthread_mutexattr_settype(&mutexattr, PTHREAD_MUTEX_RECURSIVE))
-	{
+	if (pthread_mutexattr_settype(&mutexattr, PTHREAD_MUTEX_RECURSIVE)) {
 		log_err("Failed to set the lwm2m mutex type");
 		pthread_mutexattr_destroy(&mutexattr);
 		ret = E_LWM2M_ERROR;
@@ -362,15 +451,38 @@ artik_error os_lwm2m_client_request(artik_lwm2m_handle *handle,
 		ret = E_LWM2M_ERROR;
 		goto error;
 	}
+	pthread_mutexattr_destroy(&mutexattr);
 
 	node->container = objects;
-	log_dbg("node->container %p", node->container);
+	/* Configure and start the client */
+	if (node->use_se)
+		node->client = lwm2m_client_start(node->container, node->container->server->serverCertificate, mbedtls_callback, node);
+	else
+		node->client = lwm2m_client_start(node->container, node->container->server->serverCertificate, NULL, NULL);
+
+	if (!node->client) {
+		log_err("Failed to start lwm2m client");
+		ret = E_LWM2M_ERROR;
+		goto error;
+	}
+
 	*handle = (artik_lwm2m_handle)node;
-	pthread_mutexattr_destroy(&mutexattr);
 
 	return S_OK;
 
 error:
+	if (node->device_cert) {
+		mbedtls_x509_crt_free(node->device_cert);
+		free(node->device_cert);
+		node->device_cert = NULL;
+	}
+
+	if (node->device_pkey) {
+		mbedtls_pk_free(node->device_pkey);
+		free(node->device_pkey);
+		node->device_pkey = NULL;
+	}
+
 	artik_list_delete_node(&nodes, (artik_list *)node);
 
 	if (server) {
@@ -412,17 +524,11 @@ artik_error os_lwm2m_client_connect(artik_lwm2m_handle handle)
 	if (!node)
 		return E_BAD_ARGS;
 
+	node->connected = false;
+
 	if (!node->container) {
 		log_dbg("node container is null");
 		return E_BAD_ARGS;
-	}
-
-	/* Configure and start the client */
-	node->client = lwm2m_client_start(node->container, node->container->server->serverCertificate, node->use_se);
-	if (!node->client) {
-		log_err("Failed to start lwm2m client");
-		ret = E_LWM2M_ERROR;
-		goto error;
 	}
 
 	lwm2m_register_callback(node->client, LWM2M_EXE_FACTORY_RESET,
@@ -505,7 +611,8 @@ artik_error os_lwm2m_client_disconnect(artik_lwm2m_handle handle)
 	return S_OK;
 }
 
-artik_error os_lwm2m_client_release(artik_lwm2m_handle handle) {
+artik_error os_lwm2m_client_release(artik_lwm2m_handle handle)
+{
 	lwm2m_node *node = (lwm2m_node *)artik_list_get_by_handle(nodes,
 						(ARTIK_LIST_HANDLE) handle);
 
@@ -547,6 +654,18 @@ artik_error os_lwm2m_client_release(artik_lwm2m_handle handle) {
 			free(node->container->monitoring);
 
 		free(node->container);
+	}
+
+	if (node->device_cert) {
+		mbedtls_x509_crt_free(node->device_cert);
+		free(node->device_cert);
+		node->device_cert = NULL;
+	}
+
+	if (node->device_pkey) {
+		mbedtls_pk_free(node->device_pkey);
+		free(node->device_pkey);
+		node->device_pkey = NULL;
 	}
 
 	artik_list_delete_node(&nodes, (artik_list *)node);
@@ -607,6 +726,7 @@ artik_error os_lwm2m_client_read_resource(artik_lwm2m_handle handle,
 	pthread_mutex_lock(&node->mutex);
 
 	if (node->state != LWM2M_CONNECT) {
+		pthread_mutex_unlock(&node->mutex);
 		ret = E_NOT_CONNECTED;
 		goto exit;
 	}
@@ -751,7 +871,8 @@ artik_lwm2m_object *os_lwm2m_create_device_object(const char *manufacturer,
 }
 
 artik_lwm2m_object *os_lwm2m_create_firmware_object(bool supported,
-				char *pkg_name, char *pkg_version) {
+		char *pkg_name, char *pkg_version)
+{
 	artik_lwm2m_object *obj = NULL;
 	object_firmware_t *content = NULL;
 

@@ -31,6 +31,9 @@
 
 #define MBED_DEBUG_LEVEL	0
 
+#define PEM_BEGIN_CRT		"-----BEGIN CERTIFICATE-----\n"
+#define PEM_END_CRT		"-----END CERTIFICATE-----\n"
+
 struct websocket_priv {
 	websocket_t *cli;
 	artik_websocket_callback rx_cb;
@@ -121,21 +124,21 @@ retry:
 						WEBSOCKET_ERR_CALLBACK_FAILURE);
 		} else if (ret < 0) {
 			switch (errno) {
-				case EAGAIN:
-				case EBUSY:
-					if (!retry_cnt) {
-						websocket_set_error(info->data,
-								WEBSOCKET_ERR_CALLBACK_FAILURE);
-						return ret;
-					}
-					retry_cnt--;
-					goto retry;
-
-				default:
-					log_dbg("recv error (%d)", errno);
+			case EAGAIN:
+			case EBUSY:
+				if (!retry_cnt) {
 					websocket_set_error(info->data,
 							WEBSOCKET_ERR_CALLBACK_FAILURE);
 					return ret;
+				}
+				retry_cnt--;
+				goto retry;
+
+			default:
+				log_dbg("recv error (%d)", errno);
+				websocket_set_error(info->data,
+						WEBSOCKET_ERR_CALLBACK_FAILURE);
+				return ret;
 			}
 		}
 	}
@@ -173,21 +176,21 @@ retry:
 		ret = send(fd, buf, len, flags);
 		if (ret < 0) {
 			switch (errno) {
-				case EAGAIN:
-				case EBUSY:
-					if (!retry_cnt) {
-						websocket_set_error(info->data,
-								WEBSOCKET_ERR_CALLBACK_FAILURE);
-						return ret;
-					}
-					retry_cnt--;
-					goto retry;
-
-				default:
-					log_dbg("send error (%d)", errno);
+			case EAGAIN:
+			case EBUSY:
+				if (!retry_cnt) {
 					websocket_set_error(info->data,
 							WEBSOCKET_ERR_CALLBACK_FAILURE);
 					return ret;
+				}
+				retry_cnt--;
+				goto retry;
+
+			default:
+				log_dbg("send error (%d)", errno);
+				websocket_set_error(info->data,
+						WEBSOCKET_ERR_CALLBACK_FAILURE);
+				return ret;
 			}
 		}
 	}
@@ -235,6 +238,7 @@ void websocket_on_connectivity_change_callback(websocket_context_ptr ctx,
 	struct websocket_info_t *info = user_data;
 	struct websocket_priv *priv = (struct websocket_priv *)
 							info->data->user_data;
+	artik_websocket_connection_state artik_state = ARTIK_WEBSOCKET_CLOSED;
 
 	log_dbg("");
 
@@ -244,7 +248,6 @@ void websocket_on_connectivity_change_callback(websocket_context_ptr ctx,
 	if (!priv->conn_cb)
 		return;
 
-	artik_websocket_connection_state artik_state = ARTIK_WEBSOCKET_CLOSED;
 	switch (state) {
 	case WEBSOCKET_CONNECTED:
 		artik_state = ARTIK_WEBSOCKET_CONNECTED;
@@ -254,8 +257,7 @@ void websocket_on_connectivity_change_callback(websocket_context_ptr ctx,
 		break;
 	}
 
-	priv->conn_cb(priv->conn_user_data,
-				  (void *)artik_state);
+	priv->conn_cb(priv->conn_user_data, (void *)artik_state);
 }
 
 static websocket_cb_t callbacks = {
@@ -300,29 +302,36 @@ static void ssl_cleanup(websocket_t *ws)
 	}
 }
 
-static int see_generate_random_client(void *ctx, unsigned char *data,
-								size_t len)
+static int see_generate_random_client(void *ctx, unsigned char *data, size_t len)
 {
 	artik_security_module *security = NULL;
 	artik_security_handle handle;
+	unsigned char *rand = NULL;
+	int ret = 0;
 
 	if (!data || !len)
 		return -1;
 
-	security = (artik_security_module *)
-					artik_request_api_module("security");
+	security = (artik_security_module *)artik_request_api_module("security");
 	security->request(&handle);
-	security->get_random_bytes(handle, data, len);
+
+	ret = security->get_random_bytes(handle, len, &rand);
+	if(ret == 0) {
+		memcpy(data, rand, len);
+		if(rand) {
+			free(rand);
+		}
+	}
+
 	security->release(handle);
 	artik_release_api_module(security);
 
 	return 0;
 }
 
-static artik_error ssl_setup(websocket_t *ws,
-						artik_ssl_config *ssl_config){
-
-	int ret = 0;
+static artik_error ssl_setup(websocket_t *ws, artik_ssl_config *ssl_config)
+{
+	artik_error ret = 0;
 
 	log_dbg("");
 
@@ -358,29 +367,20 @@ static artik_error ssl_setup(websocket_t *ws,
 		}
 	}
 
-	if (ssl_config->se_config.use_se) {
-		artik_security_module *security = (artik_security_module *)
-				artik_request_api_module("security");
-		artik_security_handle handle;
+	if (ssl_config->se_config) {
+		if (!ssl_config->client_cert.data || ssl_config->client_cert.len == 0) {
+			ret = E_BAD_ARGS;
+			goto exit;
+		}
+
 		ws->tls_cred->use_se = true;
-
-		ret = security->request(&handle);
-		if (ret != S_OK) {
-			log_err("Failed to load security module (err=%d)", ret);
-			artik_release_api_module(handle);
+		/* Use the first certificate in the chain, it must be the device cert */
+		ws->tls_cred->dev_cert = (unsigned char *)strdup(ssl_config->client_cert.data);
+		if (ws->tls_cred->dev_cert == NULL) {
+			ret = E_NO_MEM;
+			log_err("Failed to malloc (err=%d)\n", ret);
 			goto exit;
 		}
-
-		ret = security->get_certificate(handle, CERT_ID_ARTIK, (char **)&ws->tls_cred->dev_cert);
-		if (ret != S_OK) {
-			log_err("Failed to get device certificate (err=%d)", ret);
-			artik_release_api_module(handle);
-			goto exit;
-		}
-
-		security->release(handle);
-		artik_release_api_module(security);
-
 		ws->tls_cred->dev_certlen = strlen((char *)ws->tls_cred->dev_cert) + 1;
 		ws->tls_cred->dev_key = NULL;
 	} else if (ssl_config->client_key.data && ssl_config->client_cert.data) {
@@ -426,33 +426,20 @@ static artik_error ssl_setup(websocket_t *ws,
 	return S_OK;
 
 exit:
+
 	ssl_cleanup(ws);
 	return ret;
 }
 
-artik_error os_websocket_open_stream(artik_websocket_config *config)
+artik_error os_websocket_open_stream(artik_websocket_config *config, char *host,
+		char *path, int port, bool use_tls)
 {
 	struct websocket_priv *priv = NULL;
 	websocket_return_t ret;
 	char port_str[16];
-	char *host = NULL;
-	char *path = NULL;
-	int port = 0;
-	bool use_tls = false;
 	artik_error err = S_OK;
 
 	log_dbg("");
-
-	if (!config->uri) {
-		log_err("Undefined uri");
-		return E_WEBSOCKET_ERROR;
-	}
-
-	if (websocket_parse_uri(config->uri, &host, &path, &port, &use_tls)
-									< 0) {
-		log_err("Failed to parse uri");
-		return E_WEBSOCKET_ERROR;
-	}
 
 	/* Allocate private data structure */
 	priv = (struct websocket_priv *)zalloc(sizeof(struct websocket_priv));
@@ -474,6 +461,7 @@ artik_error os_websocket_open_stream(artik_websocket_config *config)
 	priv->cli->cb = &callbacks;
 	priv->cli->tls_enabled = use_tls;
 	priv->cli->user_data = (void *)priv;
+	priv->cli->ping_interval = config->ping_period;
 
 	/* Setup TLS configuration if applicable */
 	if (ssl_setup(priv->cli, &(config->ssl_config)) != S_OK) {
@@ -498,18 +486,11 @@ artik_error os_websocket_open_stream(artik_websocket_config *config)
 		goto error;
 	}
 
-	free(host);
-	free(path);
-
 	config->private_data = (void *)priv;
 
 	return S_OK;
 
 error:
-	if (host)
-		free(host);
-	if (path)
-		free(path);
 	if (priv) {
 		if (priv->cli) {
 			ssl_cleanup(priv->cli);
@@ -603,6 +584,3 @@ artik_error os_websocket_close_stream(artik_websocket_config *config)
 
 	return S_OK;
 }
-
-
-

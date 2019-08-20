@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <curl/curl.h>
 #include <openssl/ssl.h>
+#include <openssl/engine.h>
 #include <artik_log.h>
 #include <pthread.h>
 
@@ -43,11 +44,6 @@
 #define MAX_MESSAGE_SIZE         2048
 #define PEM_END_CERTIFICATE_UNIX "-----END CERTIFICATE-----\n"
 #define PEM_END_CERTIFICATE_WIN  "-----END CERTIFICATE-----\r\n"
-
-typedef struct {
-	char *cert;
-	char *key;
-} SSL_CTX_PARAMS;
 
 typedef struct {
 	artik_http_stream_callback callback;
@@ -88,10 +84,50 @@ static void mutex_unlock(void)
 	pthread_mutex_unlock(&lock);
 }
 
+static char *create_key_uri(artik_secure_element_config *se_config)
+{
+	const char *prefix;
+	char *engine_key_uri;
+
+	switch (se_config->key_algo) {
+	case RSA_1024:
+		prefix = "rsa1024://";
+		break;
+	case RSA_2048:
+		prefix = "rsa2048://";
+		break;
+	case ECC_BRAINPOOL_P256R1:
+		prefix = "bp256://";
+		break;
+	case ECC_SEC_P256R1:
+		prefix = "ec256://";
+		break;
+	case ECC_SEC_P384R1:
+		prefix = "ec384://";
+		break;
+	case ECC_SEC_P521R1:
+		prefix = "ec521://";
+		break;
+	default:
+		log_dbg("algo %d not supported", se_config->key_algo);
+		return NULL;
+	}
+
+	engine_key_uri = malloc(strlen(prefix) + strlen(se_config->key_id) + 1);
+	if (!engine_key_uri)
+		return NULL;
+
+	strcpy(engine_key_uri, prefix);
+	strcat(engine_key_uri, se_config->key_id);
+
+	return engine_key_uri;
+}
+
 static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 {
 	CURLcode ret = CURLE_OK;
 	artik_ssl_config *ssl_config = (artik_ssl_config *)parm;
+	artik_security_module *security = NULL;
 	SSL_CTX *ctx = (SSL_CTX *)sslctx;
 	BIO *b64 = NULL;
 	X509 *x509_cert = NULL;
@@ -99,8 +135,19 @@ static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 	X509_STORE *keystore = NULL;
 	char *start = NULL, *end = NULL;
 	int remain = 0;
+	char *uri = NULL;
 
 	log_dbg("");
+
+	if (ssl_config->se_config) {
+		security = (artik_security_module *)
+			artik_request_api_module("security");
+		if (security->load_openssl_engine() != S_OK) {
+			log_err("Failed to load openssl engine");
+			ret = CURLE_SSL_CERTPROBLEM;
+			goto exit;
+		}
+	}
 
 	if (ssl_config->ca_cert.data && ssl_config->ca_cert.len &&
 		ssl_config->verify_cert == ARTIK_SSL_VERIFY_REQUIRED) {
@@ -193,7 +240,41 @@ static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 
 	log_dbg("");
 
-	if (ssl_config->client_key.data && ssl_config->client_key.len) {
+	if (ssl_config->se_config && ssl_config->se_config->key_id) {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+		ENGINE *engine = ENGINE_get_default_ECDSA();
+#else
+		ENGINE *engine = ENGINE_get_default_EC();
+#endif
+		if (!engine) {
+			ret = CURLE_SSL_CERTPROBLEM;
+			goto exit;
+		}
+
+		uri = create_key_uri(ssl_config->se_config);
+		if (!uri) {
+			ret = CURLE_SSL_CERTPROBLEM;
+			goto exit;
+		}
+
+		pk = ENGINE_load_private_key(engine,
+									 uri, NULL, NULL);
+		free(uri);
+
+		if (!pk) {
+			log_dbg("");
+			ret = CURLE_SSL_CERTPROBLEM;
+			goto exit;
+		}
+
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+		if (ssl_config->se_config)
+			SSL_CTX_set1_curves_list(ctx, "brainpoolP256r1:prime256v1");
+#endif
+		SSL_CTX_set1_sigalgs_list(ctx, "ECDSA+SHA256");
+	} else if (ssl_config->client_key.data && ssl_config->client_key.len) {
+		log_dbg("");
+
 		/* Convert key string into a BIO */
 		b64 = BIO_new(BIO_s_mem());
 		if (!BIO_write(b64, ssl_config->client_key.data,
@@ -203,21 +284,18 @@ static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 			goto exit;
 		}
 
-		log_dbg("");
-
 		/* Extract EVP key from the BIO */
 		pk = PEM_read_bio_PrivateKey(b64, NULL, 0, NULL);
+		BIO_free(b64);
 		if (!pk) {
-			BIO_free(b64);
+			log_dbg("");
 			ret = CURLE_SSL_CERTPROBLEM;
 			goto exit;
 		}
+	}
 
-		BIO_free(b64);
-
-		log_dbg("");
-
-		/* Set private key to context */
+	/* Set private key to context */
+	if (pk) {
 		if (!SSL_CTX_use_PrivateKey(ctx, pk)) {
 			ret = CURLE_SSL_CERTPROBLEM;
 			goto exit;
@@ -225,7 +303,7 @@ static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 
 		log_dbg("");
 
-		/* Check certificate/key pair validity */
+	/* Check certificate/key pair validity */
 		if (!SSL_CTX_check_private_key(ctx)) {
 			ret = CURLE_SSL_CERTPROBLEM;
 			goto exit;
@@ -233,6 +311,10 @@ static CURLcode ssl_ctx_callback(CURL *curl, void *sslctx, void *parm)
 	}
 
 exit:
+	if (security)
+		artik_release_api_module(security);
+
+
 	if (pk)
 		EVP_PKEY_free(pk);
 
@@ -240,6 +322,23 @@ exit:
 		X509_free(x509_cert);
 
 	return ret;
+
+}
+
+static void release_openssl_engine(void)
+{
+	artik_security_module *security = (artik_security_module *)
+		artik_request_api_module("security");
+
+	if (!security) {
+		log_err("Failed to request security module");
+		return;
+	}
+
+	if (security->unload_openssl_engine() != S_OK)
+		log_err("Failed to unload openssl engine");
+
+	artik_release_api_module(security);
 
 }
 
@@ -310,18 +409,8 @@ static int os_http_process_get_stream(void *user_data)
 	if (interface->headers)
 		free(interface->headers);
 
-	if (interface->ssl) {
-		if (interface->ssl->ca_cert.data)
-			free(interface->ssl->ca_cert.data);
-
-		if (interface->ssl->client_cert.data)
-			free(interface->ssl->client_cert.data);
-
-		if (interface->ssl->client_key.data)
-			free(interface->ssl->client_key.data);
-
-		free(interface->ssl);
-	}
+	if (interface->ssl)
+		free_ssl_config(interface->ssl);
 
 	free(interface);
 
@@ -352,6 +441,9 @@ static int os_http_process_get(void *user_data)
 
 	if (interface->headers)
 		free(interface->headers);
+
+	if (interface->ssl)
+		free_ssl_config(interface->ssl);
 
 	free(interface);
 
@@ -386,6 +478,9 @@ static int os_http_process_post(void *user_data)
 	if (interface->body)
 		free(interface->body);
 
+	if (interface->ssl)
+		free_ssl_config(interface->ssl);
+
 	free(interface);
 
 	return 0;
@@ -419,6 +514,9 @@ static int os_http_process_put(void *user_data)
 	if (interface->body)
 		free(interface->body);
 
+	if (interface->ssl)
+		free_ssl_config(interface->ssl);
+
 	free(interface);
 
 	return 0;
@@ -449,6 +547,9 @@ static int os_http_process_delete(void *user_data)
 	if (interface->headers)
 		free(interface->headers);
 
+	if (interface->ssl)
+		free_ssl_config(interface->ssl);
+
 	free(interface);
 
 	return 0;
@@ -460,14 +561,11 @@ artik_error os_http_get_stream(const char *url, artik_http_headers *headers,
 {
 	CURL *curl;
 	CURLcode res;
-	artik_security_handle sec_handle = NULL;
 	struct curl_slist *h_list = NULL;
 	artik_error ret = S_OK;
-	SSL_CTX_PARAMS params = { 0 };
 	stream_callback_params cb_params = { 0 };
 	int i;
 	long lstatus;
-	artik_security_module *security = NULL;
 
 	log_dbg("");
 
@@ -524,49 +622,6 @@ artik_error os_http_get_stream(const char *url, artik_http_headers *headers,
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
 
-	/* If we use the Secure Element, setup proper certificate/key pair */
-
-	if (ssl && ssl->se_config.use_se) {
-		security = (artik_security_module *)
-					artik_request_api_module("security");
-
-		if (security->request(&sec_handle) != S_OK) {
-			log_err("Failed to request security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		}
-
-		if (security->get_certificate(sec_handle, ssl->se_config.certificate_id, &params.cert) !=
-									S_OK) {
-			log_err("Failed to get certificate from the"\
-				" security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_cert.data) {
-				free(ssl->client_cert.data);
-				ssl->client_cert.data = NULL;
-			}
-			ssl->client_cert.data = strdup(params.cert);
-			ssl->client_cert.len = strlen(params.cert);
-		}
-
-		if (security->get_key_from_cert(sec_handle, params.cert,
-							&params.key) != S_OK) {
-			log_err("Failed to get private key form the"\
-				" security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_key.data) {
-				free(ssl->client_key.data);
-				ssl->client_key.data = NULL;
-			}
-			ssl->client_key.data = strdup(params.key);
-			ssl->client_key.len = strlen(params.key);
-		}
-	}
-
 	if (ssl) {
 		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION,
 							ssl_ctx_callback);
@@ -593,22 +648,13 @@ exit:
 	curl_easy_cleanup(curl);
 	curl_global_cleanup();
 
+	if (ssl && ssl->se_config)
+		release_openssl_engine();
+
 	mutex_unlock();
 
 	if (h_list)
 		curl_slist_free_all(h_list);
-
-	if (params.cert)
-		free(params.cert);
-
-	if (params.key)
-		free(params.key);
-
-	if (sec_handle)
-		security->release(sec_handle);
-
-	if (security)
-		artik_release_api_module(security);
 
 	return ret;
 }
@@ -673,13 +719,10 @@ artik_error os_http_get(const char *url, artik_http_headers *headers,
 {
 	CURL *curl;
 	CURLcode res;
-	artik_security_handle sec_handle = NULL;
 	struct curl_slist *h_list = NULL;
 	artik_error ret = S_OK;
-	SSL_CTX_PARAMS params = { 0 };
 	int i;
 	long lstatus;
-	artik_security_module *security = NULL;
 
 	log_dbg("");
 
@@ -736,48 +779,6 @@ artik_error os_http_get(const char *url, artik_http_headers *headers,
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
 
-	/* If we use the Secure Element, setup proper certificate/key pair */
-	if (ssl && ssl->se_config.use_se) {
-		security = (artik_security_module *)
-					artik_request_api_module("security");
-
-		if (security->request(&sec_handle) != S_OK) {
-			log_err("Failed to request security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		}
-
-		if (security->get_certificate(sec_handle, ssl->se_config.certificate_id, &params.cert)
-								!= S_OK) {
-			log_err("Failed to get certificate");
-			log_err("from the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_cert.data) {
-				free(ssl->client_cert.data);
-				ssl->client_cert.data = NULL;
-			}
-			ssl->client_cert.data = strdup(params.cert);
-			ssl->client_cert.len = strlen(params.cert);
-		}
-
-		if (security->get_key_from_cert(sec_handle, params.cert,
-							&params.key) != S_OK) {
-			log_err("Failed to get private");
-			log_err("key form the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_key.data) {
-				free(ssl->client_key.data);
-				ssl->client_key.data = NULL;
-			}
-			ssl->client_key.data = strdup(params.key);
-			ssl->client_key.len = strlen(params.key);
-		}
-	}
-
 	if (ssl) {
 		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION,
 							ssl_ctx_callback);
@@ -806,20 +807,11 @@ exit:
 
 	mutex_unlock();
 
+	if (ssl && ssl->se_config)
+		release_openssl_engine();
+
 	if (h_list)
 		curl_slist_free_all(h_list);
-
-	if (params.cert)
-		free(params.cert);
-
-	if (params.key)
-		free(params.key);
-
-	if (sec_handle)
-		security->release(sec_handle);
-
-	if (security)
-		artik_release_api_module(security);
 
 	return ret;
 }
@@ -877,9 +869,6 @@ artik_error os_http_post(const char *url, artik_http_headers *headers,
 	artik_error ret = S_OK;
 	int i;
 	long lstatus;
-	SSL_CTX_PARAMS params = { 0 };
-	artik_security_handle sec_handle = NULL;
-	artik_security_module *security = NULL;
 
 	log_dbg("");
 
@@ -939,48 +928,6 @@ artik_error os_http_post(const char *url, artik_http_headers *headers,
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
 
-	/* If we use the Secure Element, setup proper certificate/key pair */
-	if (ssl && ssl->se_config.use_se) {
-		security = (artik_security_module *)
-					artik_request_api_module("security");
-
-		if (security->request(&sec_handle) != S_OK) {
-			log_err("Failed to request security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		}
-
-		if (security->get_certificate(sec_handle, ssl->se_config.certificate_id, &params.cert)
-								!= S_OK) {
-			log_err("Failed to get certificate");
-			log_err("from the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_cert.data) {
-				free(ssl->client_cert.data);
-				ssl->client_cert.data = NULL;
-			}
-			ssl->client_cert.data = strdup(params.cert);
-			ssl->client_cert.len = strlen(params.cert);
-		}
-
-		if (security->get_key_from_cert(sec_handle, params.cert,
-							&params.key) != S_OK) {
-			log_err("Failed to get private");
-			log_err("key form the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_key.data) {
-				free(ssl->client_key.data);
-				ssl->client_key.data = NULL;
-			}
-			ssl->client_key.data = strdup(params.key);
-			ssl->client_key.len = strlen(params.key);
-		}
-	}
-
 	if (ssl) {
 		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION,
 							ssl_ctx_callback);
@@ -1013,22 +960,13 @@ exit:
 	curl_easy_cleanup(curl);
 	curl_global_cleanup();
 
+	if (ssl && ssl->se_config)
+		release_openssl_engine();
+
 	mutex_unlock();
 
 	if (h_list)
 		curl_slist_free_all(h_list);
-
-	if (params.cert)
-		free(params.cert);
-
-	if (params.key)
-		free(params.key);
-
-	if (sec_handle)
-		security->release(sec_handle);
-
-	if (security)
-		artik_release_api_module(security);
 
 	return ret;
 }
@@ -1087,9 +1025,6 @@ artik_error os_http_put(const char *url, artik_http_headers *headers,
 	artik_error ret = S_OK;
 	int i;
 	long lstatus;
-	SSL_CTX_PARAMS params = { 0 };
-	artik_security_handle sec_handle = NULL;
-	artik_security_module *security = NULL;
 
 	log_dbg("");
 
@@ -1147,48 +1082,6 @@ artik_error os_http_put(const char *url, artik_http_headers *headers,
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
 
-	/* If we use the Secure Element, setup proper certificate/key pair */
-	if (ssl && ssl->se_config.use_se) {
-		security = (artik_security_module *)
-					artik_request_api_module("security");
-
-		if (security->request(&sec_handle) != S_OK) {
-			log_err("Failed to request security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		}
-
-		if (security->get_certificate(sec_handle, ssl->se_config.certificate_id, &params.cert)
-								!= S_OK) {
-			log_err("Failed to get certificate");
-			log_err("from the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_cert.data) {
-				free(ssl->client_cert.data);
-				ssl->client_cert.data = NULL;
-			}
-			ssl->client_cert.data = strdup(params.cert);
-			ssl->client_cert.len = strlen(params.cert);
-		}
-
-		if (security->get_key_from_cert(sec_handle, params.cert,
-							&params.key) != S_OK) {
-			log_err("Failed to get private");
-			log_err("key form the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_key.data) {
-				free(ssl->client_key.data);
-				ssl->client_key.data = NULL;
-			}
-			ssl->client_key.data = strdup(params.key);
-			ssl->client_key.len = strlen(params.key);
-		}
-	}
-
 	if (ssl) {
 		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION,
 							ssl_ctx_callback);
@@ -1220,20 +1113,11 @@ exit:
 
 	mutex_unlock();
 
+	if (ssl && ssl->se_config)
+		release_openssl_engine();
+
 	if (h_list)
 		curl_slist_free_all(h_list);
-
-	if (params.cert)
-		free(params.cert);
-
-	if (params.key)
-		free(params.key);
-
-	if (sec_handle)
-		security->release(sec_handle);
-
-	if (security)
-		artik_release_api_module(security);
 
 	return ret;
 }
@@ -1292,9 +1176,6 @@ artik_error os_http_delete(const char *url, artik_http_headers *headers,
 	artik_error ret = S_OK;
 	int i;
 	long lstatus;
-	SSL_CTX_PARAMS params = { 0 };
-	artik_security_handle sec_handle = NULL;
-	artik_security_module *security = NULL;
 
 	log_dbg("");
 
@@ -1352,48 +1233,6 @@ artik_error os_http_delete(const char *url, artik_http_headers *headers,
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
 
-	/* If we use the Secure Element, setup proper certificate/key pair */
-	if (ssl && ssl->se_config.use_se) {
-		security = (artik_security_module *)
-					artik_request_api_module("security");
-
-		if (security->request(&sec_handle) != S_OK) {
-			log_err("Failed to request security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		}
-
-		if (security->get_certificate(sec_handle, ssl->se_config.certificate_id, &params.cert)
-								!= S_OK) {
-			log_err("Failed to get certificate");
-			log_err("from the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_cert.data) {
-				free(ssl->client_cert.data);
-				ssl->client_cert.data = NULL;
-			}
-			ssl->client_cert.data = strdup(params.cert);
-			ssl->client_cert.len = strlen(params.cert);
-		}
-
-		if (security->get_key_from_cert(sec_handle, params.cert,
-							&params.key) != S_OK) {
-			log_err("Failed to get private");
-			log_err("key form the security module");
-			ret = E_HTTP_ERROR;
-			goto exit;
-		} else {
-			if (ssl->client_key.data) {
-				free(ssl->client_key.data);
-				ssl->client_key.data = NULL;
-			}
-			ssl->client_key.data = strdup(params.key);
-			ssl->client_key.len = strlen(params.key);
-		}
-	}
-
 	if (ssl) {
 		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION,
 							ssl_ctx_callback);
@@ -1422,20 +1261,11 @@ exit:
 
 	mutex_unlock();
 
+	if (ssl && ssl->se_config)
+		release_openssl_engine();
+
 	if (h_list)
 		curl_slist_free_all(h_list);
-
-	if (params.cert)
-		free(params.cert);
-
-	if (params.key)
-		free(params.key);
-
-	if (sec_handle)
-		security->release(sec_handle);
-
-	if (security)
-		artik_release_api_module(security);
 
 	return ret;
 }

@@ -206,7 +206,11 @@ static artik_error tls_write_temp_cert_files(struct mosquitto *mosq,
 			goto exit;
 		}
 
-		(void)write(fd, config->ca_cert.data, config->ca_cert.len);
+		if (write(fd, config->ca_cert.data, config->ca_cert.len) < 0) {
+			close(fd);
+			ret = E_ACCESS_DENIED;
+			goto exit;
+		}
 		close(fd);
 	} else if (config->verify_cert == ARTIK_SSL_VERIFY_REQUIRED) {
 		/* CA cert is mandatory when requesting verification */
@@ -222,7 +226,11 @@ static artik_error tls_write_temp_cert_files(struct mosquitto *mosq,
 			goto exit;
 		}
 
-		write(fd, config->client_cert.data, config->client_cert.len);
+		if (write(fd, config->client_cert.data, config->client_cert.len) < 0) {
+			close(fd);
+			ret = E_ACCESS_DENIED;
+			goto exit;
+		}
 		close(fd);
 	}
 
@@ -234,7 +242,11 @@ static artik_error tls_write_temp_cert_files(struct mosquitto *mosq,
 			goto exit;
 		}
 
-		write(fd, config->client_key.data, config->client_key.len);
+		if (write(fd, config->client_key.data, config->client_key.len) < 0) {
+			close(fd);
+			ret = E_ACCESS_DENIED;
+			goto exit;
+		}
 		close(fd);
 	}
 
@@ -582,6 +594,16 @@ static int loop_handler(int fd, enum watch_io io, void *handle_client)
 
 	if (!client || !client->mosq)
 		return 0;
+
+#if LIBMOSQUITTO_VERSION_NUMBER >= 1004015
+	rc = mosquitto_loop_want_connect(client->mosq);
+	if (rc != MOSQ_ERR_SUCCESS) {
+		log_dbg("mosquitto_loop_want_connect returned %d", rc);
+		loop_handle_mosquitto_error(client, rc);
+		client->watch_id = 0;
+		return 0;
+	}
+#endif
 
 	rc = mosquitto_loop_read(client->mosq, 1);
 	if (rc != MOSQ_ERR_SUCCESS) {

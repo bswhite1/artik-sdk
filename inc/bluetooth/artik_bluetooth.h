@@ -476,6 +476,8 @@ extern "C" {
 		unsigned char *bytes;
 		/*<! Number of byte in bytes */
 		int length;
+		/*<! GATT path */
+		char *path;
 	} artik_bt_gatt_data;
 
 	/*!

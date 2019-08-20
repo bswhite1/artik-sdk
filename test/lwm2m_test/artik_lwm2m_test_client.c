@@ -169,6 +169,15 @@ static void on_error(void *data, void *user_data)
 	loop->quit();
 }
 
+static void on_connection(void *data, void *user_data)
+{
+	artik_error err = (artik_error)(intptr_t)data;
+
+	fprintf(stdout, "Connection status: %s \r\n", error_msg(err));
+	if (err == E_LWM2M_DISCONNECTION_ERROR)
+		loop->quit();
+}
+
 static void on_execute_resource(void *data, void *user_data)
 {
 	char *uri = (char *)(((artik_lwm2m_resource_t *)data)->uri);
@@ -286,6 +295,68 @@ error:
 	return false;
 }
 
+static artik_error fill_ssl_config(artik_ssl_config *ssl, const char *cert_name)
+{
+	artik_secure_element_config *se_config = NULL;
+	artik_security_module *security = NULL;
+	artik_security_handle sec_handle = NULL;
+
+	se_config =  malloc(sizeof(artik_secure_element_config));
+	if (!se_config) {
+		fprintf(stderr, "Failed to allocate memory\n");
+		return E_SECURITY_ERROR;
+	}
+
+	se_config->key_id = cert_name;
+	se_config->key_algo = ECC_SEC_P256R1;
+
+	security = (artik_security_module *)artik_request_api_module("security");
+	if (security->request(&sec_handle) != S_OK) {
+		fprintf(stderr, "Failed to request security module\n");
+		artik_release_api_module(security);
+		free(se_config);
+		return E_SECURITY_ERROR;
+	}
+
+	ssl->se_config = se_config;
+
+	if (security->get_certificate(sec_handle, cert_name,
+			ARTIK_SECURITY_CERT_TYPE_PEM, (unsigned char **)&ssl->client_cert.data,
+			&ssl->client_cert.len) != S_OK) {
+		fprintf(stderr, "Failed to get certificate from the security module\n");
+		goto error;
+	}
+
+	if (security->get_publickey(sec_handle, ECC_SEC_P256R1, cert_name,
+			(unsigned char **)&ssl->client_key.data, &ssl->client_key.len) != S_OK) {
+		fprintf(stderr, "Failed to get private key from the security module\n");
+		goto error;
+	}
+
+	security->release(&sec_handle);
+	artik_release_api_module(security);
+	return S_OK;
+
+error:
+	if (ssl->client_cert.data) {
+		free(ssl->client_cert.data);
+		ssl->client_cert.data = NULL;
+		ssl->client_cert.len = 0;
+	}
+	if (ssl->client_key.data) {
+		free(ssl->client_key.data);
+		ssl->client_key.data = NULL;
+		ssl->client_key.len = 0;
+	}
+	if (ssl->se_config) {
+		free(ssl->se_config);
+		ssl->se_config = NULL;
+	}
+	security->release(&sec_handle);
+	artik_release_api_module(security);
+	return E_SECURITY_ERROR;
+}
+
 artik_error test_lwm2m_default(void)
 {
 	artik_error ret = S_OK;
@@ -324,13 +395,18 @@ artik_error test_lwm2m_default(void)
 	}
 
 	if (akc_use_se) {
-		ssl_config.se_config.use_se = true;
-		ssl_config.se_config.certificate_id = CERT_ID_ARTIK;
+		if (fill_ssl_config(&ssl_config, "ARTIK/0") != S_OK) {
+			fprintf(stdout, "TEST: failed\n");
+			if (ssl_config.ca_cert.data)
+				free(ssl_config.ca_cert.data);
+			return -1;
+		}
 		fprintf(stdout, "TEST: device certificate from SE\n");
 	} else if (strlen(akc_device_certificate_path) > 0 && strlen(akc_device_private_key_path) > 0) {
 		if (!fill_buffer_from_file(akc_device_certificate_path, &ssl_config.client_cert.data)) {
 			fprintf(stdout, "TEST: failed\n");
-			free(ssl_config.ca_cert.data);
+			if (ssl_config.ca_cert.data)
+				free(ssl_config.ca_cert.data);
 			return -1;
 		}
 		ssl_config.client_cert.len = strlen(ssl_config.client_cert.data);
@@ -390,6 +466,10 @@ artik_error test_lwm2m_default(void)
 	lwm2m->set_callback(client_h, ARTIK_LWM2M_EVENT_RESOURCE_CHANGED,
 			on_changed_resource,
 			(void *)client_h);
+	lwm2m->set_callback(client_h, ARTIK_LWM2M_EVENT_CONNECT, on_connection,
+			(void *)client_h);
+	lwm2m->set_callback(client_h, ARTIK_LWM2M_EVENT_DISCONNECT, on_connection,
+			(void *)client_h);
 
 	fprintf(stdout, "TEST: %s add watch\n", __func__);
 
@@ -415,6 +495,8 @@ exit:
 		free(ssl_config.client_cert.data);
 	if (ssl_config.client_key.data)
 		free(ssl_config.client_key.data);
+	if (ssl_config.se_config)
+		free(ssl_config.se_config);
 
 	return ret;
 }
